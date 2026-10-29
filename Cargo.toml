@@ -13,17 +13,29 @@ keywords = ["javascript", "js", "engine", "interpreter", "runtime"]
 categories = ["development-tools", "parsing"]
 
 [features]
-default = ["node", "console"]
+default = ["node", "console", "jit"]
 node = ["process", "os", "fs"]
 process = []
 os = ["dep:libc", "dep:windows-sys"]
 fs = []
 console = []
+jit = [
+    "dep:cranelift-codegen",
+    "dep:cranelift-frontend",
+    "dep:cranelift-jit",
+    "dep:cranelift-module",
+    "dep:cranelift-native",
+]
 
 [dependencies]
 base64easy = "0.1.7"
 bitflags = { version = "2.13.2", default-features = false, features = [] }
 chrono = { version = "0.4.45", features = ["serde"] }
+cranelift-codegen = { version = "0.137.0", optional = true }
+cranelift-frontend = { version = "0.137.0", optional = true }
+cranelift-jit = { version = "0.137.0", optional = true }
+cranelift-module = { version = "0.137.0", optional = true }
+cranelift-native = { version = "0.137.0", optional = true }
 crossbeam-channel = "0.5.17"
 gc-arena = { version = "0.7.0", features = ["indexmap"] }
 indexmap = "2.14.2"
@@ -55,7 +67,7 @@ rustyline = "19.0.0"
 [[example]]
 name = "js-rs"
 path = "js/main.rs"
-required-features = ["node"]
+required-features = ["node", "console", "jit"]
 
 [[bench]]
 name = "promise_benchmarks"

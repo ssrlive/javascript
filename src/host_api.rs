@@ -7,6 +7,15 @@ use std::collections::HashMap;
 
 pub(crate) type BoxedJsCallback = Box<dyn FnMut(&[JsValue]) -> Result<JsValue, JSError>>;
 
+pub(crate) type NativeJitFunction = unsafe extern "C" fn(*const f64) -> f64;
+
+pub(crate) struct NativeJitRegistration {
+    pub(crate) ip: usize,
+    pub(crate) arity: usize,
+    pub(crate) function: NativeJitFunction,
+    pub(crate) dependencies: Vec<(String, usize)>,
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct HostModuleRegistry {
     globals: HashMap<String, String>,

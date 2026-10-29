@@ -65,6 +65,8 @@ impl JsRuntime {
 
         let gc_opcode_budget = self.gc_opcode_budget();
         let arena = &mut self.arena;
+        #[cfg(feature = "jit")]
+        let jit_engine = &mut self.jit_engine;
         let mut initialized = false;
         let mut module_to_finalize: Option<(String, Vec<String>)> = None;
 
@@ -158,6 +160,11 @@ impl JsRuntime {
                         vm.apply_module_resolution_overrides(&mut compiler, entry_path);
                     }
                     let chunk = compiler.compile(&statements)?;
+                    #[cfg(feature = "jit")]
+                    let jit_functions = jit_engine
+                        .as_mut()
+                        .map(|engine| engine.compile_functions(&statements, &chunk))
+                        .unwrap_or_default();
                     if let Some((_, _, main_export_name_to_local, _, _, _, _)) = &main_module_record {
                         let hoisted_locals = collect_hoisted_function_names(&statements);
                         if !hoisted_locals.is_empty() {
@@ -189,6 +196,16 @@ impl JsRuntime {
                         vm.chunk.const_import_bindings = main_const_import_bindings;
                     } else {
                         vm.chunk = chunk;
+                    }
+
+                    #[cfg(feature = "jit")]
+                    for registration in jit_functions {
+                        vm.register_jit_function(
+                            registration.ip + main_code_offset.unwrap_or(0),
+                            registration.arity,
+                            registration.function,
+                            registration.dependencies,
+                        );
                     }
 
                     if run_as_module {

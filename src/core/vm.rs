@@ -659,6 +659,14 @@ unsafe impl<'gc> Collect<'gc> for SuspendedModuleState<'gc> {
     }
 }
 
+struct JitFunctionEntry {
+    arity: usize,
+    calls: u8,
+    arguments: Vec<f64>,
+    function: crate::host_api::NativeJitFunction,
+    dependencies: Vec<(String, usize)>,
+}
+
 unsafe impl<'gc> Collect<'gc> for VM<'gc> {
     fn trace<T: GcTrace<'gc>>(&self, cc: &mut T) {
         self.chunk.trace(cc);
@@ -741,6 +749,7 @@ pub struct VM<'gc> {
     super_called_stack: Vec<bool>,     // tracks whether super() was called in derived ctors
     host_function_handlers: Vec<HostFunctionHandler>,
     host_modules: crate::host_api::HostModuleRegistry,
+    jit_functions: HashMap<usize, JitFunctionEntry>,
     stop_requested: bool,
     // Property storage for Function values, keyed by function IP
     fn_props: HashMap<usize, ObjectHandle<'gc>>,
@@ -1160,6 +1169,7 @@ impl<'gc> VM<'gc> {
             super_called_stack: Vec::new(),
             host_function_handlers: Vec::new(),
             host_modules: crate::host_api::HostModuleRegistry::default(),
+            jit_functions: HashMap::new(),
             stop_requested: false,
             fn_props: HashMap::new(),
             fn_realm: HashMap::new(),
@@ -3702,13 +3712,30 @@ impl<'gc> VM<'gc> {
         result
     }
 
+    #[cfg(not(feature = "jit"))]
     pub(crate) fn prepare_merged_script(&mut self, code: &str) -> Result<(), JSError> {
+        self.prepare_merged_script_with_jit(code, |_, _| Vec::new())
+    }
+
+    pub(crate) fn prepare_merged_script_with_jit<F>(&mut self, code: &str, compile_jit: F) -> Result<(), JSError>
+    where
+        F: FnOnce(&[crate::core::Statement], &Chunk<'gc>) -> Vec<crate::host_api::NativeJitRegistration>,
+    {
         let statements = crate::core::parse_program_statements(code, false)?;
         let mut compiler = self.new_compiler();
         compiler.set_source_text(code.to_string());
         let chunk = compiler.compile(&statements)?;
+        let jit_functions = compile_jit(&statements, &chunk);
         self.validate_script_global_declarations(&chunk)?;
         let (code_offset, _) = self.merge_eval_chunk(&chunk);
+        for registration in jit_functions {
+            self.register_jit_function(
+                registration.ip + code_offset,
+                registration.arity,
+                registration.function,
+                registration.dependencies,
+            );
+        }
         self.set_source_context(code, None);
         self.ip = code_offset;
         Ok(())
@@ -3732,6 +3759,25 @@ impl<'gc> VM<'gc> {
 
     pub(crate) fn host_module_registry(&self) -> &crate::host_api::HostModuleRegistry {
         &self.host_modules
+    }
+
+    pub(crate) fn register_jit_function(
+        &mut self,
+        ip: usize,
+        arity: usize,
+        function: crate::host_api::NativeJitFunction,
+        dependencies: Vec<(String, usize)>,
+    ) {
+        self.jit_functions.insert(
+            ip,
+            JitFunctionEntry {
+                arity,
+                calls: 0,
+                arguments: Vec::with_capacity(arity),
+                function,
+                dependencies,
+            },
+        );
     }
 
     pub(crate) fn new_compiler(&self) -> crate::core::Compiler<'gc> {

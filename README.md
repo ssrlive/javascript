@@ -38,7 +38,7 @@ This engine is intentionally not a legacy-web-quirk-compatible sloppy-mode runti
 ## Highlights
 
 - Bytecode VM architecture (not AST tree-walking execution)
-- JavaScript execution currently uses an interpreter; there is no JIT compiler
+- Optional Cranelift JIT for a restricted subset of numeric functions, with interpreter fallback
 - ECMAScript parser and compiler implemented in Rust
 - Supports script and module execution
 - Includes async-related features (Promises, async/await, top-level await in module mode)
@@ -69,6 +69,7 @@ Core source layout:
 ```bash
 cargo build --all-features --release
 cargo build --example js-rs --release
+cargo build --example js-rs --release --features jit
 
 # Install the CLI into ~/.cargo/bin
 cargo install --path . --example js-rs
@@ -109,6 +110,20 @@ Options:
 ```
 
 `--timer-wait-ms` is currently accepted for compatibility but is not wired to runtime behavior.
+
+### Optional JIT
+
+Enable the experimental Cranelift JIT with `--features jit`. It compiles eligible
+ordinary function declarations that use numeric parameters and supported local
+arithmetic, comparisons, and `for` loops. The generated function is used after
+its second call when all arguments are numbers. Unsupported functions, methods,
+closures, and calls with non-numeric arguments continue to use the interpreter.
+This is an experimental MVP, not a general-purpose optimizing JavaScript JIT.
+
+```bash
+cargo test --features jit --test jit_tests
+cargo build --release --example js-rs --features jit
+```
 
 ## REPL behavior
 
@@ -294,7 +309,9 @@ The runner builds the engine, composes harness files, runs tests, and writes log
 
 As of this version:
 
-- JIT compilation is not implemented; JavaScript runs on the bytecode interpreter
+- Cranelift JIT compilation is experimental and limited to eligible functions and
+  supported operations; all other JavaScript continues to run on the bytecode
+  interpreter. See [Optional JIT](#optional-jit) for the current scope.
 - decorators: class, method, and field decorators are supported; advanced semantics may still be incomplete
 - full historical sloppy-mode quirks: intentionally not a compatibility target
 

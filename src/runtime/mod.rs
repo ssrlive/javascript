@@ -3,6 +3,8 @@ pub(crate) mod console;
 mod evaluation;
 #[cfg(feature = "fs")]
 pub(crate) mod fs;
+#[cfg(feature = "jit")]
+mod jit;
 #[cfg(any(feature = "process", feature = "os", feature = "fs"))]
 mod node_common;
 #[cfg(feature = "os")]
@@ -53,6 +55,8 @@ pub struct JsRuntime {
     module_loader: Option<Rc<RefCell<Box<dyn ModuleLoader>>>>,
     eval_in_progress: bool,
     host_hooks: HostHooks,
+    #[cfg(feature = "jit")]
+    jit_engine: Option<jit::JitEngine>,
     #[cfg(feature = "console")]
     console_state: console::ConsoleStateRef,
     agent_context_id: u64,
@@ -74,6 +78,14 @@ impl JsRuntime {
         };
         #[cfg(feature = "console")]
         let console_state = console::new_state();
+        #[cfg(feature = "jit")]
+        let jit_engine = match jit::JitEngine::new() {
+            Ok(engine) => Some(engine),
+            Err(error) => {
+                log::warn!("JIT is unavailable; using the interpreter: {error}");
+                None
+            }
+        };
         let arena = JsArenaVm::new(|ctx| {
             #[allow(unused_mut)]
             let mut vm = VM::new(Chunk::new(), ctx);
@@ -93,6 +105,8 @@ impl JsRuntime {
             module_loader: None,
             eval_in_progress: false,
             host_hooks: HostHooks::default(),
+            #[cfg(feature = "jit")]
+            jit_engine,
             #[cfg(feature = "console")]
             console_state,
             agent_context_id,
@@ -214,7 +228,27 @@ impl JsRuntime {
         if self.eval_in_progress {
             return Err(raise_eval_error!("A script evaluation is already in progress"));
         }
-        self.mutate_root(|_ctx, vm| vm.prepare_merged_script(code.as_ref()))?;
+        let context_id = self.agent_context_id;
+        {
+            let arena = &mut self.arena;
+            #[cfg(feature = "jit")]
+            let jit_engine = &mut self.jit_engine;
+            crate::js_agent::with_context(context_id, || {
+                arena.mutate_root(|_ctx, vm| {
+                    #[cfg(feature = "jit")]
+                    {
+                        vm.prepare_merged_script_with_jit(code.as_ref(), |statements, chunk| {
+                            jit_engine
+                                .as_mut()
+                                .map(|engine| engine.compile_functions(statements, chunk))
+                                .unwrap_or_default()
+                        })
+                    }
+                    #[cfg(not(feature = "jit"))]
+                    vm.prepare_merged_script(code.as_ref())
+                })
+            })?;
+        }
         self.eval_in_progress = true;
         Ok(())
     }
@@ -290,21 +324,37 @@ impl JsRuntime {
         }
         let code_str = code.as_ref();
         let budget = self.gc_opcode_budget;
+        let context_id = self.agent_context_id;
         let mut initialized = false;
 
         let result = loop {
-            let step = self.mutate_root(|ctx, vm| -> Result<Option<JsValue>, JSError> {
-                if !initialized {
-                    vm.prepare_merged_script(code_str)?;
-                    initialized = true;
-                }
+            let step = {
+                let arena = &mut self.arena;
+                #[cfg(feature = "jit")]
+                let jit_engine = &mut self.jit_engine;
+                crate::js_agent::with_context(context_id, || {
+                    arena.mutate_root(|ctx, vm| -> Result<Option<JsValue>, JSError> {
+                        if !initialized {
+                            #[cfg(feature = "jit")]
+                            vm.prepare_merged_script_with_jit(code_str, |statements, chunk| {
+                                jit_engine
+                                    .as_mut()
+                                    .map(|engine| engine.compile_functions(statements, chunk))
+                                    .unwrap_or_default()
+                            })?;
+                            #[cfg(not(feature = "jit"))]
+                            vm.prepare_merged_script(code_str)?;
+                            initialized = true;
+                        }
 
-                let Some(mut v) = vm.run_slice(ctx, budget)? else {
-                    return Ok(None);
-                };
-                v = vm.unwrap_settled_top_level_promise(ctx, v)?;
-                Ok(Some(vm.value_to_host_value(&v)))
-            });
+                        let Some(mut value) = vm.run_slice(ctx, budget)? else {
+                            return Ok(None);
+                        };
+                        value = vm.unwrap_settled_top_level_promise(ctx, value)?;
+                        Ok(Some(vm.value_to_host_value(&value)))
+                    })
+                })
+            };
             self.dispatch_console_output();
 
             match step {

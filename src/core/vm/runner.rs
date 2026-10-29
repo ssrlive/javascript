@@ -794,6 +794,37 @@ impl<'gc> VM<'gc> {
                 } else {
                     Some(Value::Object(self.global_this))
                 };
+                if !is_method && !is_tail_call && arg_count == arity as usize {
+                    let argument_values = &self.stack[callee_idx + 1..callee_idx + 1 + arg_count];
+                    let dependencies_match = self.jit_functions.get(&target_ip).is_some_and(|entry| {
+                        entry.arity == arg_count
+                            && entry.dependencies.iter().all(
+                                |(name, expected_ip)| matches!(self.globals.get(name), Some(Value::Function(ip, _)) if ip == expected_ip),
+                            )
+                    });
+                    if argument_values.iter().all(|value| matches!(value, Value::Number(_)))
+                        && dependencies_match
+                        && let Some(entry) = self.jit_functions.get_mut(&target_ip)
+                    {
+                        entry.arguments.clear();
+                        for value in argument_values {
+                            if let Value::Number(number) = value {
+                                entry.arguments.push(*number);
+                            }
+                        }
+                        entry.calls = entry.calls.saturating_add(1);
+                        if entry.calls >= 2 {
+                            if entry.calls == 2 {
+                                log::debug!("JIT activated for function at bytecode offset {target_ip}");
+                            }
+                            let function = entry.function;
+                            let result = unsafe { function(entry.arguments.as_ptr()) };
+                            self.stack.truncate(callee_idx);
+                            self.stack.push(Value::Number(result));
+                            return Ok(OpcodeAction::Continue);
+                        }
+                    }
+                }
                 self.push_or_replace_call_frame_for_function(
                     is_tail_call,
                     callee_idx,

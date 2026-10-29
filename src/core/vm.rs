@@ -662,7 +662,7 @@ unsafe impl<'gc> Collect<'gc> for SuspendedModuleState<'gc> {
 struct JitFunctionEntry {
     arity: usize,
     calls: u8,
-    arguments: Vec<f64>,
+    arguments: Vec<crate::host_api::JitValue>,
     function: crate::host_api::NativeJitFunction,
     dependencies: Vec<(String, usize)>,
 }
@@ -750,6 +750,7 @@ pub struct VM<'gc> {
     host_function_handlers: Vec<HostFunctionHandler>,
     host_modules: crate::host_api::HostModuleRegistry,
     jit_functions: HashMap<usize, JitFunctionEntry>,
+    jit_required: bool,
     stop_requested: bool,
     // Property storage for Function values, keyed by function IP
     fn_props: HashMap<usize, ObjectHandle<'gc>>,
@@ -1170,6 +1171,7 @@ impl<'gc> VM<'gc> {
             host_function_handlers: Vec::new(),
             host_modules: crate::host_api::HostModuleRegistry::default(),
             jit_functions: HashMap::new(),
+            jit_required: false,
             stop_requested: false,
             fn_props: HashMap::new(),
             fn_realm: HashMap::new(),
@@ -3778,6 +3780,11 @@ impl<'gc> VM<'gc> {
                 dependencies,
             },
         );
+    }
+
+    #[cfg(feature = "jit")]
+    pub(crate) fn set_jit_required(&mut self, required: bool) {
+        self.jit_required = required;
     }
 
     pub(crate) fn new_compiler(&self) -> crate::core::Compiler<'gc> {
@@ -20412,6 +20419,11 @@ impl<'gc> VM<'gc> {
     ) -> Result<Value<'gc>, JSError> {
         match func {
             Value::Function(ip, arity) => {
+                if self.jit_required {
+                    return Err(crate::raise_eval_error!(format!(
+                        "JIT-required mode cannot execute function at bytecode offset {ip} through a runtime callback"
+                    )));
+                }
                 if let Some(&realm_id) = self.fn_realm.get(ip)
                     && realm_id < self.child_realms.len()
                     && let Some(mut child) = self.child_realms[realm_id].take()
@@ -20489,6 +20501,9 @@ impl<'gc> VM<'gc> {
                 self.this_stack.pop();
                 out
             }
+            Value::Closure(ip, _, _) if self.jit_required => Err(crate::raise_eval_error!(format!(
+                "JIT-required mode cannot execute closure at bytecode offset {ip} through a runtime callback"
+            ))),
             Value::Closure(ip, arity, upv) => {
                 if let Some(&realm_id) = self.fn_realm.get(ip)
                     && realm_id < self.child_realms.len()
@@ -20583,6 +20598,15 @@ impl<'gc> VM<'gc> {
             Value::Object(map) => {
                 let function_id = get_function_id(*map);
                 let borrow = map.borrow();
+                if self.jit_required
+                    && (borrow.contains_key("__proxy_target__")
+                        || borrow.contains_key("__bound_target__")
+                        || borrow.contains_key("__fn_body__"))
+                {
+                    return Err(crate::raise_eval_error!(
+                        "JIT-required mode cannot execute wrapped JavaScript function"
+                    ));
+                }
                 if let Some(Value::String(host_name_u16)) = borrow.get("__host_fn__") {
                     let host_this = borrow.get("__host_this__").cloned();
                     let host_name = crate::unicode::utf16_to_utf8(host_name_u16);

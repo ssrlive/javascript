@@ -120,10 +120,25 @@ its second call when all arguments are numbers. Unsupported functions, methods,
 closures, and calls with non-numeric arguments continue to use the interpreter.
 This is an experimental MVP, not a general-purpose optimizing JavaScript JIT.
 
+For JIT tests, call `JsRuntime::set_jit_required(true)` to require ordinary
+JavaScript function calls to use compiled code immediately. Unsupported
+functions, methods, closures, tail/spread calls, and non-numeric arguments return
+an error instead of silently falling back; built-ins continue to use their
+runtime implementations.
+
+JIT entries use a tagged call frame and an explicit return/throw/deopt/suspend
+status ABI. The current backend only emits numeric values; bytecode-level
+compilation and GC root/safepoint integration are not implemented yet.
+
 ```bash
 cargo test --features jit --test jit_tests
+cargo test --features jit --test jit_coverage -- --nocapture
 cargo build --release --example js-rs --features jit
 ```
+
+The coverage test prints a row for every bytecode opcode and built-in function.
+The current JIT compiles a restricted AST subset, not bytecode opcodes, and does
+not compile built-ins; those rows are therefore reported as interpreter-only.
 
 ## REPL behavior
 

@@ -137,6 +137,17 @@ impl JsRuntime {
         self.gc_opcode_budget
     }
 
+    /// Require ordinary JavaScript function calls to execute through the JIT.
+    ///
+    /// When enabled, a function that was not compiled by the JIT, is called
+    /// with unsupported arguments, or otherwise cannot enter native code
+    /// returns an error instead of silently falling back to the interpreter.
+    /// Built-in functions continue to use their existing runtime implementations.
+    #[cfg(feature = "jit")]
+    pub fn set_jit_required(&mut self, required: bool) {
+        self.mutate_root(|_, vm| vm.set_jit_required(required));
+    }
+
     /// Update the opcode budget between incremental GC safe points.
     pub fn set_gc_opcode_budget(&mut self, gc_opcode_budget: usize) -> Result<(), JSError> {
         if gc_opcode_budget == 0 {

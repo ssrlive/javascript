@@ -7,7 +7,136 @@ use std::collections::HashMap;
 
 pub(crate) type BoxedJsCallback = Box<dyn FnMut(&[JsValue]) -> Result<JsValue, JSError>>;
 
-pub(crate) type NativeJitFunction = unsafe extern "C" fn(*const f64) -> f64;
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum JitValueTag {
+    Undefined,
+    Null,
+    Boolean,
+    Number,
+    BigInt,
+    String,
+    Function,
+    Closure,
+    Array,
+    Object,
+    Symbol,
+    NativeFunction,
+    Map,
+    Set,
+    Property,
+    Uninitialized,
+}
+
+impl TryFrom<u32> for JitValueTag {
+    type Error = ();
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Undefined),
+            1 => Ok(Self::Null),
+            2 => Ok(Self::Boolean),
+            3 => Ok(Self::Number),
+            4 => Ok(Self::BigInt),
+            5 => Ok(Self::String),
+            6 => Ok(Self::Function),
+            7 => Ok(Self::Closure),
+            8 => Ok(Self::Array),
+            9 => Ok(Self::Object),
+            10 => Ok(Self::Symbol),
+            11 => Ok(Self::NativeFunction),
+            12 => Ok(Self::Map),
+            13 => Ok(Self::Set),
+            14 => Ok(Self::Property),
+            15 => Ok(Self::Uninitialized),
+            _ => Err(()),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct JitValue {
+    pub(crate) tag: u32,
+    pub(crate) flags: u32,
+    pub(crate) payload: u64,
+}
+
+impl JitValue {
+    pub(crate) const fn number(value: f64) -> Self {
+        Self {
+            tag: JitValueTag::Number as u32,
+            flags: 0,
+            payload: value.to_bits(),
+        }
+    }
+
+    pub(crate) const fn undefined() -> Self {
+        Self {
+            tag: JitValueTag::Undefined as u32,
+            flags: 0,
+            payload: 0,
+        }
+    }
+
+    pub(crate) fn as_number(self) -> Option<f64> {
+        (JitValueTag::try_from(self.tag).ok()? == JitValueTag::Number).then(|| f64::from_bits(self.payload))
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) struct NativeJitFrame {
+    pub(crate) arguments: *const JitValue,
+    pub(crate) argument_count: usize,
+    pub(crate) result: JitValue,
+    pub(crate) exception: JitValue,
+}
+
+impl NativeJitFrame {
+    pub(crate) fn new(arguments: &[JitValue]) -> Self {
+        Self {
+            arguments: arguments.as_ptr(),
+            argument_count: arguments.len(),
+            result: JitValue::undefined(),
+            exception: JitValue::undefined(),
+        }
+    }
+}
+
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NativeJitStatus {
+    Returned = 0,
+    Threw = 1,
+    Deopt = 2,
+    Suspended = 3,
+}
+
+impl TryFrom<i32> for NativeJitStatus {
+    type Error = i32;
+
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Returned),
+            1 => Ok(Self::Threw),
+            2 => Ok(Self::Deopt),
+            3 => Ok(Self::Suspended),
+            _ => Err(value),
+        }
+    }
+}
+
+pub(crate) type NativeJitFunction = unsafe extern "C" fn(*mut NativeJitFrame) -> i32;
+
+pub(crate) fn invoke_native_jit(function: NativeJitFunction, arguments: &[JitValue]) -> Result<(NativeJitStatus, JitValue, JitValue), i32> {
+    let mut frame = NativeJitFrame::new(arguments);
+    let status = NativeJitStatus::try_from(unsafe { function(&mut frame) })?;
+    Ok((status, frame.result, frame.exception))
+}
+
+const _: () = assert!(std::mem::size_of::<JitValue>() == 16);
+const _: () = assert!(std::mem::offset_of!(JitValue, payload) == 8);
 
 pub(crate) struct NativeJitRegistration {
     pub(crate) ip: usize,

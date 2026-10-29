@@ -1,5 +1,5 @@
 use crate::core::{BinaryOp, Chunk, DestructuringElement, Expr, Statement, StatementKind};
-use crate::host_api::{NativeJitFunction, NativeJitRegistration};
+use crate::host_api::{JitValue as NativeJitValue, JitValueTag, NativeJitFrame, NativeJitFunction, NativeJitRegistration, NativeJitStatus};
 use cranelift_codegen::ir::{
     AbiParam, FuncRef, Function as ClifFunction, InstBuilder, MemFlagsData, UserFuncName, condcodes::FloatCC, types,
 };
@@ -182,7 +182,7 @@ impl JitEngine {
         let pointer_type = self.module.target_config().pointer_type();
         let mut signature = self.module.make_signature();
         signature.params.push(AbiParam::new(pointer_type));
-        signature.returns.push(AbiParam::new(types::F64));
+        signature.returns.push(AbiParam::new(types::I32));
         let function_id = self
             .module
             .declare_function(&function_name, Linkage::Local, &signature)
@@ -197,7 +197,13 @@ impl JitEngine {
             let entry = builder.create_block();
             builder.switch_to_block(entry);
             builder.append_block_params_for_function_params(entry);
-            let arguments_pointer = builder.block_params(entry)[0];
+            let frame_pointer = builder.block_params(entry)[0];
+            let arguments_pointer = builder.ins().load(
+                pointer_type,
+                MemFlagsData::new(),
+                frame_pointer,
+                std::mem::offset_of!(NativeJitFrame, arguments) as i32,
+            );
 
             let mut function_compiler = FunctionCompiler {
                 builder: &mut builder,
@@ -210,7 +216,7 @@ impl JitEngine {
                     types::F64,
                     MemFlagsData::new(),
                     arguments_pointer,
-                    (index * std::mem::size_of::<f64>()) as i32,
+                    (index * std::mem::size_of::<NativeJitValue>() + std::mem::offset_of!(NativeJitValue, payload)) as i32,
                 );
                 function_compiler.declare_local(name, value)?;
             }
@@ -223,7 +229,22 @@ impl JitEngine {
                     let JitValue::Number(value) = function_compiler.compile_expression(expression)? else {
                         return Err("only numeric return expressions are supported".to_string());
                     };
-                    function_compiler.builder.ins().return_(&[value]);
+                    let result_offset = std::mem::offset_of!(NativeJitFrame, result) as i32;
+                    let tag = function_compiler.builder.ins().iconst(types::I32, JitValueTag::Number as i64);
+                    function_compiler.builder.ins().store(
+                        MemFlagsData::new(),
+                        tag,
+                        frame_pointer,
+                        result_offset + std::mem::offset_of!(NativeJitValue, tag) as i32,
+                    );
+                    function_compiler.builder.ins().store(
+                        MemFlagsData::new(),
+                        value,
+                        frame_pointer,
+                        result_offset + std::mem::offset_of!(NativeJitValue, payload) as i32,
+                    );
+                    let returned = function_compiler.builder.ins().iconst(types::I32, NativeJitStatus::Returned as i64);
+                    function_compiler.builder.ins().return_(&[returned]);
                 } else {
                     function_compiler.compile_statement(statement)?;
                 }

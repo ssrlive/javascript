@@ -3,6 +3,64 @@
 use javascript::{JsRuntime, JsValue};
 
 #[test]
+fn jit_required_mode_executes_compiled_functions_on_the_first_call() {
+    let mut runtime = JsRuntime::new();
+    runtime.set_jit_required(true);
+
+    let result = runtime.eval("function twice(value) { return value * 2; } twice(21);").unwrap();
+
+    assert_eq!(result, JsValue::Number(42.0));
+}
+
+#[test]
+fn jit_required_mode_rejects_functions_that_would_fall_back() {
+    let mut runtime = JsRuntime::new();
+    runtime.set_jit_required(true);
+
+    let error = runtime
+        .eval(r#"function append(value) { return value + "!"; } append("js");"#)
+        .unwrap_err();
+
+    assert!(error.to_string().contains("JIT-required mode"));
+}
+
+#[test]
+fn jit_required_mode_rejects_non_numeric_arguments() {
+    let mut runtime = JsRuntime::new();
+    runtime.set_jit_required(true);
+
+    let error = runtime
+        .eval(r#"function twice(value) { return value * 2; } twice("21");"#)
+        .unwrap_err();
+
+    assert!(error.to_string().contains("unsupported arguments"));
+}
+
+#[test]
+fn jit_required_mode_rejects_wrapped_function_fallbacks() {
+    let mut runtime = JsRuntime::new();
+    runtime.set_jit_required(true);
+
+    let error = runtime
+        .eval("function twice(value) { return value * 2; } const bound = twice.bind(null, 21); bound();")
+        .unwrap_err();
+
+    assert!(error.to_string().contains("wrapped JavaScript function"));
+}
+
+#[test]
+fn jit_required_mode_rejects_runtime_callback_fallbacks() {
+    let mut runtime = JsRuntime::new();
+    runtime.set_jit_required(true);
+
+    let error = runtime
+        .eval("function twice(value) { return value * 2; } [21].map(twice);")
+        .unwrap_err();
+
+    assert!(error.to_string().contains("runtime callback"));
+}
+
+#[test]
 fn jit_numeric_functions_match_interpreter_results() {
     let mut runtime = JsRuntime::new();
     let result = runtime

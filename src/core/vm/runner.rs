@@ -662,6 +662,61 @@ impl<'gc> VM<'gc> {
                     self.handle_throw(ctx, &err)?;
                     return Ok(OpcodeAction::Continue);
                 }
+                if self.jit_required {
+                    if is_method || is_tail_call {
+                        return Err(crate::raise_eval_error!(format!(
+                            "JIT-required mode cannot execute method or tail call at bytecode offset {target_ip}"
+                        )));
+                    }
+                    let Some(entry) = self.jit_functions.get(&target_ip) else {
+                        return Err(crate::raise_eval_error!(format!(
+                            "JIT-required mode: function at bytecode offset {target_ip} was not compiled"
+                        )));
+                    };
+                    let argument_values = &self.stack[callee_idx + 1..callee_idx + 1 + arg_count];
+                    if entry.arity != arg_count
+                        || argument_values.iter().any(|value| !matches!(value, Value::Number(_)))
+                        || !entry
+                            .dependencies
+                            .iter()
+                            .all(|(name, expected_ip)| matches!(self.globals.get(name), Some(Value::Function(ip, _)) if ip == expected_ip))
+                    {
+                        return Err(crate::raise_eval_error!(format!(
+                            "JIT-required mode: function at bytecode offset {target_ip} has unsupported arguments or changed dependencies"
+                        )));
+                    }
+                    let entry = self
+                        .jit_functions
+                        .get_mut(&target_ip)
+                        .expect("JIT function registration was checked above");
+                    entry.arguments.clear();
+                    entry.arguments.extend(argument_values.iter().map(|value| match value {
+                        Value::Number(number) => crate::host_api::JitValue::number(*number),
+                        _ => unreachable!("JIT-required arguments were checked as numbers"),
+                    }));
+                    let (status, result, exception) = crate::host_api::invoke_native_jit(entry.function, &entry.arguments)
+                        .map_err(|status| crate::raise_eval_error!(format!("JIT returned invalid status {status}")))?;
+                    let result = match status {
+                        crate::host_api::NativeJitStatus::Returned => result
+                            .as_number()
+                            .ok_or_else(|| crate::raise_eval_error!("JIT returned a non-numeric value through the numeric ABI"))?,
+                        crate::host_api::NativeJitStatus::Threw => {
+                            return Err(crate::raise_eval_error!(format!(
+                                "JIT exception propagation is not implemented (exception tag {})",
+                                exception.tag
+                            )));
+                        }
+                        crate::host_api::NativeJitStatus::Deopt => {
+                            return Err(crate::raise_eval_error!("JIT-required function requested interpreter fallback"));
+                        }
+                        crate::host_api::NativeJitStatus::Suspended => {
+                            return Err(crate::raise_eval_error!("JIT suspension is not implemented"));
+                        }
+                    };
+                    self.stack.truncate(callee_idx);
+                    self.stack.push(Value::Number(result));
+                    return Ok(OpcodeAction::Continue);
+                }
                 if let Some(&realm_id) = self.fn_realm.get(&target_ip)
                     && realm_id < self.child_realms.len()
                     && let Some(mut child) = self.child_realms[realm_id].take()
@@ -809,7 +864,7 @@ impl<'gc> VM<'gc> {
                         entry.arguments.clear();
                         for value in argument_values {
                             if let Value::Number(number) = value {
-                                entry.arguments.push(*number);
+                                entry.arguments.push(crate::host_api::JitValue::number(*number));
                             }
                         }
                         entry.calls = entry.calls.saturating_add(1);
@@ -817,11 +872,30 @@ impl<'gc> VM<'gc> {
                             if entry.calls == 2 {
                                 log::debug!("JIT activated for function at bytecode offset {target_ip}");
                             }
-                            let function = entry.function;
-                            let result = unsafe { function(entry.arguments.as_ptr()) };
-                            self.stack.truncate(callee_idx);
-                            self.stack.push(Value::Number(result));
-                            return Ok(OpcodeAction::Continue);
+                            let (status, result, exception) = crate::host_api::invoke_native_jit(entry.function, &entry.arguments)
+                                .map_err(|status| crate::raise_eval_error!(format!("JIT returned invalid status {status}")))?;
+                            match status {
+                                crate::host_api::NativeJitStatus::Returned => {
+                                    let Some(result) = result.as_number() else {
+                                        return Err(crate::raise_eval_error!("JIT returned a non-numeric value through the numeric ABI"));
+                                    };
+                                    self.stack.truncate(callee_idx);
+                                    self.stack.push(Value::Number(result));
+                                    return Ok(OpcodeAction::Continue);
+                                }
+                                crate::host_api::NativeJitStatus::Deopt => {
+                                    log::debug!("JIT deoptimized function at bytecode offset {target_ip}");
+                                }
+                                crate::host_api::NativeJitStatus::Threw => {
+                                    return Err(crate::raise_eval_error!(format!(
+                                        "JIT exception propagation is not implemented (exception tag {})",
+                                        exception.tag
+                                    )));
+                                }
+                                crate::host_api::NativeJitStatus::Suspended => {
+                                    return Err(crate::raise_eval_error!("JIT suspension is not implemented"));
+                                }
+                            }
                         }
                     }
                 }
@@ -842,6 +916,11 @@ impl<'gc> VM<'gc> {
                 self.ip = target_ip;
             }
             Value::Closure(target_ip, arity, ref upvals) => {
+                if self.jit_required {
+                    return Err(crate::raise_eval_error!(format!(
+                        "JIT-required mode cannot execute closure at bytecode offset {target_ip}"
+                    )));
+                }
                 // Class constructors cannot be called without `new` — check
                 // early so cross-realm dispatch doesn't bypass the guard.
                 if !is_method && self.chunk.class_constructor_ips.contains(&target_ip) {
@@ -1053,6 +1132,16 @@ impl<'gc> VM<'gc> {
                 let function_id = get_function_id(*map);
                 // Check if it's a Function wrapper (Object with __fn_body__ or __native_id__)
                 let borrow = map.borrow();
+                if self.jit_required
+                    && (borrow.contains_key("__proxy_target__")
+                        || borrow.contains_key("__bound_target__")
+                        || borrow.contains_key("__fn_body__"))
+                {
+                    drop(borrow);
+                    return Err(crate::raise_eval_error!(
+                        "JIT-required mode cannot execute wrapped JavaScript function"
+                    ));
+                }
                 if let Some(Value::String(host_name_u16)) = borrow.get("__host_fn__") {
                     let host_name = crate::unicode::utf16_to_utf8(host_name_u16);
                     let bound_this = borrow.get("__host_this__").cloned();
@@ -3176,6 +3265,11 @@ impl<'gc> VM<'gc> {
         let callee = self.stack[callee_idx].clone();
         match callee {
             Value::Function(target_ip, arity) => {
+                if self.jit_required {
+                    return Err(crate::raise_eval_error!(format!(
+                        "JIT-required mode cannot execute spread call at bytecode offset {target_ip}"
+                    )));
+                }
                 let derived_tdz = if is_method && self.chunk.derived_constructor_ips.contains(&target_ip) {
                     Some(true)
                 } else {
@@ -3207,6 +3301,11 @@ impl<'gc> VM<'gc> {
                 self.ip = target_ip;
             }
             Value::Closure(target_ip, arity, ref upvals) => {
+                if self.jit_required {
+                    return Err(crate::raise_eval_error!(format!(
+                        "JIT-required mode cannot execute spread call to closure at bytecode offset {target_ip}"
+                    )));
+                }
                 let closure_upvalues = (**upvals).clone();
                 let derived_tdz = if is_method && self.chunk.derived_constructor_ips.contains(&target_ip) {
                     Some(true)
@@ -3381,6 +3480,9 @@ impl<'gc> VM<'gc> {
             err_map.insert("message".to_string(), Value::from("is not a constructor"));
             self.handle_throw(ctx, &Value::Object(new_gc_cell_ptr(ctx, err_map)))?;
             return Ok(OpcodeAction::Continue);
+        }
+        if self.jit_required && matches!(&constructor, Value::Function(..) | Value::Closure(..)) {
+            return Err(crate::raise_eval_error!("JIT-required mode cannot execute spread constructor"));
         }
         match self.construct_value(ctx, &constructor, &spread_args, Some(&constructor)) {
             Ok(result) => self.stack.push(result),
@@ -7661,6 +7763,11 @@ impl<'gc> VM<'gc> {
         }
         match callee {
             Value::Function(target_ip, _arity) | Value::Closure(target_ip, _arity, _) => {
+                if self.jit_required {
+                    return Err(crate::raise_eval_error!(format!(
+                        "JIT-required mode cannot execute constructor at bytecode offset {target_ip}"
+                    )));
+                }
                 if self.fn_realm.contains_key(&target_ip) {
                     let args: Vec<Value<'gc>> = (0..arg_count)
                         .map(|_| self.stack.pop().expect("VM Stack underflow"))

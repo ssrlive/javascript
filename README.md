@@ -129,8 +129,10 @@ runtime implementations.
 JIT entries use a tagged call frame and an explicit return/throw/deopt/suspend
 status ABI. The current backend only emits numeric values. The VM traces values
 in active JIT argument-root frames, and JIT setup decodes bytecode into a
-validated control-flow graph; bytecode-to-machine-code translation and explicit
-GC safepoint callbacks are not implemented yet.
+validated control-flow graph with active exception-handler edges and handler
+state checks at control-flow merges. These edges are conservative; bytecode-to-
+machine-code translation, JS exception propagation from native code, and
+explicit GC safepoint callbacks are not implemented yet.
 
 ```bash
 cargo test --features jit --test jit_tests

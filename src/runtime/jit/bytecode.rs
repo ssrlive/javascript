@@ -1,5 +1,5 @@
 use crate::core::{Chunk, Opcode, OpcodeOperandLayout};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::ops::Range;
 
 #[derive(Debug)]
@@ -9,6 +9,8 @@ pub(crate) struct DecodedInstruction {
     pub(crate) opcode: Opcode,
     pub(crate) operand: Range<usize>,
     branch_target: Option<usize>,
+    // Conservative handler edges; opcode-specific throwability is not classified yet.
+    pub(crate) exceptional_targets: Vec<usize>,
 }
 
 #[derive(Debug)]
@@ -17,12 +19,14 @@ pub(crate) struct BasicBlock {
     pub(crate) end: usize,
     pub(crate) instruction_range: Range<usize>,
     pub(crate) successors: Vec<usize>,
+    pub(crate) exceptional_successors: Vec<usize>,
 }
 
 #[derive(Debug)]
 pub(crate) struct ExceptionHandler {
     pub(crate) setup_offset: usize,
     pub(crate) target: usize,
+    for_finally: bool,
 }
 
 #[derive(Debug)]
@@ -62,6 +66,7 @@ impl ControlFlowGraph {
                     handlers.push(ExceptionHandler {
                         setup_offset: offset,
                         target,
+                        for_finally: code[operand.start + 6] & 1 != 0,
                     });
                     Some(target)
                 }
@@ -93,6 +98,7 @@ impl ControlFlowGraph {
                 opcode,
                 operand,
                 branch_target,
+                exceptional_targets: Vec::new(),
             });
             offset = next_offset;
         }
@@ -126,6 +132,7 @@ impl ControlFlowGraph {
                 end,
                 instruction_range: instruction_start..instruction_end,
                 successors: Vec::new(),
+                exceptional_successors: Vec::new(),
             });
         }
 
@@ -162,11 +169,134 @@ impl ControlFlowGraph {
             }
         }
 
+        build_exception_edges(
+            &mut instructions,
+            &mut blocks,
+            &handlers,
+            &block_by_start,
+            chunk.fn_names.keys().copied(),
+        )?;
+
         Ok(Self {
             instructions,
             blocks,
             exception_handlers: handlers,
         })
+    }
+}
+
+fn build_exception_edges(
+    instructions: &mut [DecodedInstruction],
+    blocks: &mut [BasicBlock],
+    handlers: &[ExceptionHandler],
+    block_by_start: &HashMap<usize, usize>,
+    function_entries: impl IntoIterator<Item = usize>,
+) -> Result<(), String> {
+    let handler_by_setup = handlers
+        .iter()
+        .enumerate()
+        .map(|(index, handler)| (handler.setup_offset, index))
+        .collect::<HashMap<_, _>>();
+    let mut entry_handlers = vec![None::<Vec<usize>>; blocks.len()];
+    let mut worklist = VecDeque::new();
+
+    seed_handler_state(block_by_start[&0], Vec::new(), &mut entry_handlers, &mut worklist, blocks)?;
+    for entry in function_entries {
+        let block = *block_by_start
+            .get(&entry)
+            .ok_or_else(|| format!("function entry {entry} is not a basic block"))?;
+        seed_handler_state(block, Vec::new(), &mut entry_handlers, &mut worklist, blocks)?;
+    }
+
+    while let Some(block_index) = worklist.pop_front() {
+        let mut active_handlers = entry_handlers[block_index]
+            .clone()
+            .expect("queued blocks have an incoming exception-handler state");
+        let instruction_range = blocks[block_index].instruction_range.clone();
+
+        for instruction_index in instruction_range {
+            let opcode = instructions[instruction_index].opcode;
+            if !matches!(opcode, Opcode::SetupTry | Opcode::TeardownTry)
+                && let Some(&top_handler) = active_handlers.last()
+            {
+                let mut handler_positions = vec![active_handlers.len() - 1];
+                if !handlers[top_handler].for_finally
+                    && let Some(outer_finally) = active_handlers[..active_handlers.len() - 1]
+                        .iter()
+                        .rposition(|&handler| handlers[handler].for_finally)
+                {
+                    handler_positions.push(outer_finally);
+                }
+
+                for handler_position in handler_positions {
+                    let handler = &handlers[active_handlers[handler_position]];
+                    instructions[instruction_index].exceptional_targets.push(handler.target);
+                    let target_block = block_by_start[&handler.target];
+                    seed_handler_state(
+                        target_block,
+                        active_handlers[..handler_position].to_vec(),
+                        &mut entry_handlers,
+                        &mut worklist,
+                        blocks,
+                    )?;
+                }
+                instructions[instruction_index].exceptional_targets.sort_unstable();
+                instructions[instruction_index].exceptional_targets.dedup();
+                blocks[block_index]
+                    .exceptional_successors
+                    .extend(instructions[instruction_index].exceptional_targets.iter().copied());
+            }
+
+            match opcode {
+                Opcode::SetupTry => {
+                    let handler = *handler_by_setup
+                        .get(&instructions[instruction_index].offset)
+                        .ok_or_else(|| format!("SetupTry at {} has no handler record", instructions[instruction_index].offset))?;
+                    active_handlers.push(handler);
+                }
+                Opcode::TeardownTry => match active_handlers.pop() {
+                    Some(_) => {}
+                    None => {
+                        return Err(format!(
+                            "TeardownTry at {} has no active SetupTry",
+                            instructions[instruction_index].offset
+                        ));
+                    }
+                },
+                _ => {}
+            }
+        }
+
+        let successors = blocks[block_index].successors.clone();
+        for successor in successors {
+            let target_block = block_by_start[&successor];
+            seed_handler_state(target_block, active_handlers.clone(), &mut entry_handlers, &mut worklist, blocks)?;
+        }
+        blocks[block_index].exceptional_successors.sort_unstable();
+        blocks[block_index].exceptional_successors.dedup();
+    }
+
+    Ok(())
+}
+
+fn seed_handler_state(
+    block_index: usize,
+    handlers: Vec<usize>,
+    entry_handlers: &mut [Option<Vec<usize>>],
+    worklist: &mut VecDeque<usize>,
+    blocks: &[BasicBlock],
+) -> Result<(), String> {
+    match &entry_handlers[block_index] {
+        Some(existing) if *existing != handlers => Err(format!(
+            "inconsistent active exception handlers at control-flow merge into bytecode offset {}",
+            blocks[block_index].start
+        )),
+        Some(_) => Ok(()),
+        None => {
+            entry_handlers[block_index] = Some(handlers);
+            worklist.push_back(block_index);
+            Ok(())
+        }
     }
 }
 
@@ -259,6 +389,89 @@ mod tests {
 
         assert_eq!(graph.exception_handlers.len(), 1);
         assert_eq!(graph.exception_handlers[0].target, 8);
+    }
+
+    #[test]
+    fn connects_throwing_instructions_to_active_handlers() {
+        let graph = ControlFlowGraph::build(&chunk(vec![
+            Opcode::SetupTry as u8,
+            12,
+            0,
+            0,
+            0,
+            0xff,
+            0xff,
+            0,
+            Opcode::Constant as u8,
+            0,
+            0,
+            Opcode::TeardownTry as u8,
+            Opcode::Return as u8,
+        ]))
+        .unwrap();
+
+        assert_eq!(graph.instructions[1].exceptional_targets, vec![12]);
+        assert_eq!(graph.blocks[0].exceptional_successors, vec![12]);
+    }
+
+    #[test]
+    fn includes_enclosing_finally_handlers_for_generator_return_paths() {
+        let graph = ControlFlowGraph::build(&chunk(vec![
+            Opcode::SetupTry as u8,
+            22,
+            0,
+            0,
+            0,
+            0xff,
+            0xff,
+            1,
+            Opcode::SetupTry as u8,
+            24,
+            0,
+            0,
+            0,
+            0xff,
+            0xff,
+            0,
+            Opcode::Constant as u8,
+            0,
+            0,
+            Opcode::TeardownTry as u8,
+            Opcode::TeardownTry as u8,
+            Opcode::Return as u8,
+            Opcode::Return as u8,
+            Opcode::Return as u8,
+            Opcode::TeardownTry as u8,
+            Opcode::Return as u8,
+        ]))
+        .unwrap();
+
+        assert_eq!(graph.instructions[2].exceptional_targets, vec![22, 24]);
+    }
+
+    #[test]
+    fn rejects_inconsistent_handler_state_at_control_flow_merges() {
+        let graph = ControlFlowGraph::build(&chunk(vec![
+            Opcode::SetupTry as u8,
+            16,
+            0,
+            0,
+            0,
+            0xff,
+            0xff,
+            0,
+            Opcode::JumpIfFalse as u8,
+            14,
+            0,
+            0,
+            0,
+            Opcode::TeardownTry as u8,
+            Opcode::Return as u8,
+            Opcode::Pop as u8,
+            Opcode::Return as u8,
+        ]));
+
+        assert!(graph.unwrap_err().contains("inconsistent active exception handlers"));
     }
 
     #[test]

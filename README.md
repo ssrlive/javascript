@@ -122,7 +122,7 @@ Add dependency:
 
 ```toml
 [dependencies]
-javascript = "0.3.4"
+javascript = "0.3.5"
 ```
 
 Basic script evaluation:

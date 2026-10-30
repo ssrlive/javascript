@@ -163,6 +163,20 @@ impl TryFrom<i32> for NativeJitStatus {
 
 pub(crate) type NativeJitFunction = unsafe extern "C" fn(*mut NativeJitFrame) -> i32;
 
+#[derive(Clone, Debug)]
+#[cfg_attr(not(feature = "jit"), allow(dead_code))]
+pub(crate) enum JitDependency {
+    Function {
+        name: String,
+        ip: usize,
+    },
+    BuiltinProperty {
+        object: String,
+        property: String,
+        function_id: usize,
+    },
+}
+
 pub(crate) fn invoke_native_jit(
     function: NativeJitFunction,
     arguments: &mut [JitValue],
@@ -182,7 +196,7 @@ pub(crate) struct NativeJitRegistration {
     pub(crate) upvalue_count: usize,
     pub(crate) function: NativeJitFunction,
     pub(crate) generic_value: bool,
-    pub(crate) dependencies: Vec<(String, usize)>,
+    pub(crate) dependencies: Vec<JitDependency>,
 }
 
 #[derive(Clone, Default)]

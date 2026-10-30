@@ -677,7 +677,7 @@ struct JitFunctionEntry {
     calls: u8,
     function: crate::host_api::NativeJitFunction,
     generic_value: bool,
-    dependencies: Vec<(String, usize)>,
+    dependencies: Vec<crate::host_api::JitDependency>,
 }
 
 unsafe impl<'gc> Collect<'gc> for VM<'gc> {
@@ -3788,7 +3788,7 @@ impl<'gc> VM<'gc> {
         upvalue_count: usize,
         function: crate::host_api::NativeJitFunction,
         generic_value: bool,
-        dependencies: Vec<(String, usize)>,
+        dependencies: Vec<crate::host_api::JitDependency>,
     ) {
         self.jit_functions.insert(
             ip,

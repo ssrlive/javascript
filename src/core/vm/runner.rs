@@ -129,6 +129,32 @@ fn native_jit_value_to_vm<'gc>(
 }
 
 impl<'gc> VM<'gc> {
+    fn jit_dependencies_match(&self, dependencies: &[crate::host_api::JitDependency]) -> bool {
+        dependencies.iter().all(|dependency| match dependency {
+            crate::host_api::JitDependency::Function { name, ip } => {
+                matches!(self.globals.get(name), Some(Value::Function(actual_ip, _)) if actual_ip == ip)
+            }
+            crate::host_api::JitDependency::BuiltinProperty {
+                object,
+                property,
+                function_id,
+            } => match self.globals.get(object) {
+                Some(Value::Object(value)) => {
+                    let properties = value.borrow();
+                    match properties.get(property) {
+                        Some(Value::NativeFunction(actual_id)) => actual_id == function_id,
+                        Some(Value::Property {
+                            value: Some(actual_value),
+                            getter: None,
+                            ..
+                        }) => matches!(actual_value.as_ref(), Value::NativeFunction(actual_id) if actual_id == function_id),
+                        _ => false,
+                    }
+                }
+                _ => false,
+            },
+        })
+    }
     /// Core execution loop of the VM (Fetch-Decode-Execute)
     pub fn run(&mut self, ctx: &GcContext<'gc>) -> Result<Value<'gc>, JSError> {
         let result = self.run_inner(ctx, 0)?;
@@ -881,14 +907,12 @@ impl<'gc> VM<'gc> {
                     let Some((arity, upvalue_count, generic_value, function, dependencies_match)) =
                         self.jit_functions.get(&target_ip).map(|entry| {
                             (
-                            entry.arity,
-                            entry.upvalue_count,
-                            entry.generic_value,
-                            entry.function,
-                            entry.dependencies.iter().all(
-                                |(name, expected_ip)| matches!(self.globals.get(name), Some(Value::Function(ip, _)) if ip == expected_ip),
-                            ),
-                        )
+                                entry.arity,
+                                entry.upvalue_count,
+                                entry.generic_value,
+                                entry.function,
+                                self.jit_dependencies_match(&entry.dependencies),
+                            )
                         })
                     else {
                         return Err(crate::raise_eval_error!(format!(
@@ -896,13 +920,19 @@ impl<'gc> VM<'gc> {
                         )));
                     };
                     let argument_values = &self.stack[callee_idx + 1..callee_idx + 1 + arg_count];
-                    if arity != arg_count
-                        || upvalue_count != 0
-                        || (!generic_value && argument_values.iter().any(|value| !matches!(value, Value::Number(_))))
-                        || !dependencies_match
-                    {
+                    if arity != arg_count || upvalue_count != 0 {
                         return Err(crate::raise_eval_error!(format!(
-                            "JIT-required mode: function at bytecode offset {target_ip} has unsupported arguments or changed dependencies"
+                            "JIT-required mode: function at bytecode offset {target_ip} has an unsupported arity or captured upvalues"
+                        )));
+                    }
+                    if !generic_value && argument_values.iter().any(|value| !matches!(value, Value::Number(_))) {
+                        return Err(crate::raise_eval_error!(format!(
+                            "JIT-required mode: function at bytecode offset {target_ip} has unsupported arguments (numeric arguments required)"
+                        )));
+                    }
+                    if !dependencies_match {
+                        return Err(crate::raise_eval_error!(format!(
+                            "JIT-required mode: function at bytecode offset {target_ip} has changed dependencies"
                         )));
                     }
                     self.execute_native_jit_call(
@@ -1055,12 +1085,8 @@ impl<'gc> VM<'gc> {
                     let entry = self.jit_functions.get(&target_ip);
                     let generic_value = entry.is_some_and(|entry| entry.generic_value);
                     let upvalue_count = entry.map_or(0, |entry| entry.upvalue_count);
-                    let dependencies_match = entry.is_some_and(|entry| {
-                        entry.arity == arg_count
-                            && entry.dependencies.iter().all(
-                                |(name, expected_ip)| matches!(self.globals.get(name), Some(Value::Function(ip, _)) if ip == expected_ip),
-                            )
-                    });
+                    let dependencies_match =
+                        entry.is_some_and(|entry| entry.arity == arg_count && self.jit_dependencies_match(&entry.dependencies));
                     if upvalue_count == 0
                         && (generic_value || argument_values.iter().all(|value| matches!(value, Value::Number(_))))
                         && dependencies_match
@@ -1123,11 +1149,7 @@ impl<'gc> VM<'gc> {
                                 entry.upvalue_count,
                                 entry.generic_value,
                                 entry.function,
-                                entry.dependencies.iter().all(
-                                    |(name, expected_ip)| {
-                                        matches!(self.globals.get(name), Some(Value::Function(ip, _)) if ip == expected_ip)
-                                    },
-                                ),
+                                self.jit_dependencies_match(&entry.dependencies),
                             )
                         })
                     else {
@@ -1173,10 +1195,7 @@ impl<'gc> VM<'gc> {
                     let upvalue_count = entry.upvalue_count;
                     let generic_value = entry.generic_value;
                     let function = entry.function;
-                    let dependencies_match = entry
-                        .dependencies
-                        .iter()
-                        .all(|(name, expected_ip)| matches!(self.globals.get(name), Some(Value::Function(ip, _)) if ip == expected_ip));
+                    let dependencies_match = self.jit_dependencies_match(&entry.dependencies);
                     if let Some(captured_cells) = upvals.get(..upvalue_count) {
                         let captured_values = captured_cells.iter().map(|cell| cell.borrow().clone()).collect::<Vec<_>>();
                         let argument_values = &self.stack[callee_idx + 1..callee_idx + 1 + arg_count];

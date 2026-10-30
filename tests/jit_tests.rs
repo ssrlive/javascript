@@ -13,6 +13,54 @@ fn jit_required_mode_executes_compiled_functions_on_the_first_call() {
 }
 
 #[test]
+fn jit_required_mode_inlines_numeric_math_abs_with_interpreter_equivalent_results() {
+    let source = r#"
+        function absolute(value) { return Math.abs(value); }
+        1 / absolute(-0) + absolute(-42);
+    "#;
+    let mut interpreter = JsRuntime::new();
+    let expected = interpreter.eval(source).unwrap();
+    let mut runtime = JsRuntime::new();
+    runtime.set_jit_required(true);
+
+    let result = runtime.eval(source).unwrap();
+
+    assert_eq!(result, expected);
+    assert_eq!(result, JsValue::Number(f64::INFINITY));
+}
+
+#[test]
+fn jit_falls_back_to_interpreter_when_math_abs_is_replaced() {
+    let mut runtime = JsRuntime::new();
+    runtime
+        .eval(
+            "function absolute(value) { return Math.abs(value); } \
+             function wrapped(value) { return absolute(value); }",
+        )
+        .unwrap();
+    runtime.eval("Math.abs = function(value) { return 99; };").unwrap();
+
+    let result = runtime.eval("wrapped(-42);").unwrap();
+
+    assert_eq!(result, JsValue::Number(99.0));
+}
+
+#[test]
+fn jit_required_mode_rejects_replaced_math_abs_dependency() {
+    let mut runtime = JsRuntime::new();
+    runtime.set_jit_required(true);
+
+    let error = runtime
+        .eval(
+            "function absolute(value) { return Math.abs(value); } \
+             Math.abs = function(value) { return 99; }; absolute(-42);",
+        )
+        .unwrap_err();
+
+    assert!(error.to_string().contains("changed dependencies"));
+}
+
+#[test]
 fn jit_required_mode_executes_arrow_closures_without_upvalue_access() {
     let source = "const addOne = value => value + 1; addOne(41);";
     let mut interpreter = JsRuntime::new();
@@ -594,22 +642,95 @@ fn jit_native_throw_reaches_supported_in_function_catch() {
 }
 
 #[test]
-fn jit_required_mode_rejects_handlers_inside_compiled_functions() {
+fn jit_required_mode_executes_statically_typed_catch_bindings() {
+    let source = r#"
+        function catchesLocally() {
+            let adjustment = 1;
+            try {
+                throw 41;
+            } catch (error) {
+                return error + adjustment;
+            }
+            return 0;
+        }
+        function catchesBoolean() {
+            try {
+                throw true;
+            } catch (error) {
+                return error ? 42 : 0;
+            }
+            return 0;
+        }
+        function catchesUndefined() {
+            try {
+                throw void 0;
+            } catch (error) {
+                return error ? 0 : 42;
+            }
+            return 0;
+        }
+        function catchesNull() {
+            try {
+                throw null;
+            } catch (error) {
+                return !error ? 42 : 0;
+            }
+            return 0;
+        }
+        catchesLocally() + catchesBoolean() + catchesUndefined() + catchesNull();
+    "#;
+    let mut interpreter = JsRuntime::new();
+    let expected = interpreter.eval(source).unwrap();
+    let mut runtime = JsRuntime::new();
+    runtime.set_jit_required(true);
+
+    let result = runtime.eval(source).unwrap();
+
+    assert_eq!(result, expected);
+    assert_eq!(result, JsValue::Number(168.0));
+}
+
+#[test]
+fn jit_required_mode_rejects_mixed_type_catch_bindings() {
     let mut runtime = JsRuntime::new();
     runtime.set_jit_required(true);
 
     let error = runtime
         .eval(
             r#"
-            function catchesLocally() {
+            function catchesMixedValues(condition) {
                 try {
-                    throw 1;
+                    if (condition) throw 1;
+                    throw true;
                 } catch (error) {
-                    return error;
+                    return error ? 1 : 0;
                 }
-                return 0;
             }
-            catchesLocally();
+            catchesMixedValues(1);
+            "#,
+        )
+        .unwrap_err();
+
+    assert!(error.to_string().contains("JIT-required mode"));
+}
+
+#[test]
+fn jit_required_mode_rejects_catch_binding_when_other_local_is_read_first() {
+    let mut runtime = JsRuntime::new();
+    runtime.set_jit_required(true);
+
+    let error = runtime
+        .eval(
+            r#"
+            function catchesWithLocal() {
+                let other = 1;
+                try {
+                    throw 41;
+                } catch (error) {
+                    return other + error;
+                }
+            }
+            catchesWithLocal();
             "#,
         )
         .unwrap_err();

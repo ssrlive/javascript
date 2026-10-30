@@ -1,4 +1,6 @@
+use crate::core::function_id::BUILTIN_MATH_ABS;
 use crate::core::{BinaryOp, Chunk, DestructuringElement, Expr, Opcode, Statement, StatementKind};
+use crate::host_api::JitDependency;
 use crate::host_api::{JitValue as NativeJitValue, JitValueTag, NativeJitFrame, NativeJitFunction, NativeJitRegistration, NativeJitStatus};
 use cranelift_codegen::ir::{
     AbiParam, BlockArg, FuncRef, Function as ClifFunction, InstBuilder, MemFlagsData, UserFuncName,
@@ -89,7 +91,7 @@ struct FunctionCandidate<'a> {
     name: String,
     params: Vec<String>,
     body: &'a [Statement],
-    dependencies: Vec<(String, usize)>,
+    dependencies: Vec<JitDependency>,
 }
 
 #[derive(Clone)]
@@ -271,10 +273,38 @@ impl JitEngine {
             for statement in *body {
                 collect_inline_dependencies_from_statement(statement, &inline_functions, &mut dependency_names);
             }
-            let dependencies = dependency_names
+            let mut pending_dependencies = dependency_names.iter().cloned().collect::<Vec<_>>();
+            let mut builtin_dependencies = HashSet::new();
+            for statement in *body {
+                collect_builtin_dependencies_from_statement(statement, &mut builtin_dependencies);
+            }
+            while let Some(dependency_name) = pending_dependencies.pop() {
+                let Some(inline) = inline_functions.get(&dependency_name) else {
+                    continue;
+                };
+                collect_builtin_dependencies_from_expression(&inline.expression, &mut builtin_dependencies);
+                let mut nested_dependencies = HashSet::new();
+                collect_inline_dependencies_from_expression(&inline.expression, &inline_functions, &mut nested_dependencies);
+                for nested_dependency in nested_dependencies {
+                    if dependency_names.insert(nested_dependency.clone()) {
+                        pending_dependencies.push(nested_dependency);
+                    }
+                }
+            }
+            let mut dependencies = dependency_names
                 .into_iter()
-                .filter_map(|dependency_name| inline_functions.get(&dependency_name).map(|inline| (dependency_name, inline.ip)))
-                .collect();
+                .filter_map(|dependency_name| {
+                    inline_functions.get(&dependency_name).map(|inline| JitDependency::Function {
+                        name: dependency_name,
+                        ip: inline.ip,
+                    })
+                })
+                .collect::<Vec<_>>();
+            dependencies.extend(builtin_dependencies.into_iter().map(|property| JitDependency::BuiltinProperty {
+                object: "Math".to_string(),
+                property,
+                function_id: BUILTIN_MATH_ABS,
+            }));
             candidates.push(FunctionCandidate {
                 ip: *ip,
                 name: name.clone(),
@@ -404,6 +434,33 @@ impl JitEngine {
             .enumerate()
             .map(|(index, block)| (block.start, index))
             .collect::<HashMap<_, _>>();
+        let mut candidate_reachable_blocks = HashSet::new();
+        let mut reachability_worklist = VecDeque::from([entry_index]);
+        while let Some(block_index) = reachability_worklist.pop_front() {
+            if !candidate_reachable_blocks.insert(block_index) {
+                continue;
+            }
+            reachability_worklist.extend(
+                cfg.blocks[block_index]
+                    .successors
+                    .iter()
+                    .filter_map(|target| block_indices.get(target).copied()),
+            );
+            reachability_worklist.extend(
+                cfg.blocks[block_index]
+                    .exceptional_successors
+                    .iter()
+                    .filter_map(|target| block_indices.get(target).copied()),
+            );
+        }
+        let candidate_reachable_offsets = candidate_reachable_blocks
+            .iter()
+            .flat_map(|index| {
+                cfg.instructions[cfg.blocks[*index].instruction_range.clone()]
+                    .iter()
+                    .map(|instruction| instruction.offset)
+            })
+            .collect::<HashSet<_>>();
         let other_function_entries = chunk
             .fn_names
             .keys()
@@ -418,6 +475,68 @@ impl JitEngine {
             .filter(|entry| *entry > candidate.ip)
             .min()
             .unwrap_or(chunk.code.len());
+        let mut catch_binding_locals = HashMap::<usize, (usize, usize)>::new();
+        for instruction in cfg
+            .instructions
+            .iter()
+            .filter(|instruction| candidate_reachable_offsets.contains(&instruction.offset) && instruction.opcode == Opcode::SetupTry)
+        {
+            let binding = u16::from_le_bytes([chunk.code[instruction.operand.start + 4], chunk.code[instruction.operand.start + 5]]);
+            let flags = chunk.code[instruction.operand.start + 6];
+            if binding == u16::MAX || flags & 1 != 0 {
+                continue;
+            }
+            let Some(crate::core::Value::String(binding_name)) = chunk.constants.get(binding as usize) else {
+                return Ok(None);
+            };
+            let binding_name = crate::unicode::utf16_to_utf8(binding_name);
+            let Some(target_bytes) = chunk.code.get(instruction.operand.start..instruction.operand.start + 4) else {
+                return Ok(None);
+            };
+            let target = u32::from_le_bytes(target_bytes.try_into().expect("four-byte handler target")) as usize;
+            let Some(target_index) = cfg.instructions.iter().position(|instruction| instruction.offset == target) else {
+                return Ok(None);
+            };
+            let get_global = &cfg.instructions[target_index];
+            if get_global.opcode != Opcode::GetGlobal {
+                return Ok(None);
+            }
+            let global_name_index =
+                u16::from_le_bytes([chunk.code[get_global.operand.start], chunk.code[get_global.operand.start + 1]]) as usize;
+            if !matches!(
+                chunk.constants.get(global_name_index),
+                Some(crate::core::Value::String(name)) if crate::unicode::utf16_to_utf8(name) == binding_name
+            ) {
+                return Ok(None);
+            }
+            let Some(get_local) = cfg
+                .instructions
+                .get(target_index + 1)
+                .filter(|next| next.offset == get_global.next_offset)
+            else {
+                return Ok(None);
+            };
+            if get_local.opcode != Opcode::GetLocal {
+                return Ok(None);
+            }
+            let local_index = chunk.code[get_local.operand.start] as usize;
+            let catch_slot = chunk
+                .fn_local_names
+                .get(&candidate.ip)
+                .map_or(candidate.params.len(), Vec::len)
+                .max(candidate.params.len());
+            if local_index != catch_slot
+                || cfg.instructions.iter().any(|prior| {
+                    candidate.ip <= prior.offset
+                        && prior.offset < instruction.offset
+                        && matches!(prior.opcode, Opcode::SetLocal | Opcode::BoxLocal)
+                        && chunk.code[prior.operand.start] as usize == local_index
+                })
+            {
+                return Ok(None);
+            }
+            catch_binding_locals.insert(get_global.offset, (target, local_index));
+        }
         let bytecode_local_count = cfg
             .instructions
             .iter()
@@ -439,6 +558,7 @@ impl JitEngine {
         let mut local_types = initial_locals.clone();
         let mut local_type_conflicts = vec![false; local_count];
         let mut local_reads = vec![false; local_count];
+        let mut catch_binding_kinds = HashMap::<usize, BytecodeStackKind>::new();
         let mut upvalue_count = 0;
         let mut incoming_locals = vec![None::<Vec<Option<BytecodeStackKind>>>; cfg.blocks.len()];
         let mut worklist = VecDeque::from([entry_index]);
@@ -488,11 +608,36 @@ impl JitEngine {
                         } else {
                             return Ok(None);
                         }
-                        let Some(Some(local_kind @ (BytecodeStackKind::Number | BytecodeStackKind::Boolean))) = locals.get(local_index)
+                        let Some(Some(
+                            local_kind @ (BytecodeStackKind::Number
+                            | BytecodeStackKind::Boolean
+                            | BytecodeStackKind::Undefined
+                            | BytecodeStackKind::Null),
+                        )) = locals.get(local_index)
                         else {
                             return Ok(None);
                         };
                         stack.push(*local_kind);
+                    }
+                    Opcode::GetGlobal => {
+                        let Some((target, local_index)) = catch_binding_locals.get(&instruction.offset).copied() else {
+                            return Ok(None);
+                        };
+                        let Some(value_kind) = catch_binding_kinds.get(&target).copied() else {
+                            return Ok(None);
+                        };
+                        if local_index >= locals.len() {
+                            return Ok(None);
+                        }
+                        if local_type_conflicts[local_index] {
+                            local_types[local_index] = None;
+                        } else if local_types[local_index].is_some_and(|kind| kind != value_kind) {
+                            local_type_conflicts[local_index] = true;
+                            local_types[local_index] = None;
+                        } else {
+                            local_types[local_index] = Some(value_kind);
+                        }
+                        locals[local_index] = Some(value_kind);
                     }
                     Opcode::GetUpvalue => {
                         let upvalue_index = chunk.code[instruction.operand.start] as usize;
@@ -594,7 +739,9 @@ impl JitEngine {
                         stack.push(BytecodeStackKind::Number);
                     }
                     Opcode::Not => match stack.pop() {
-                        Some(BytecodeStackKind::Number | BytecodeStackKind::Boolean) => {
+                        Some(
+                            BytecodeStackKind::Number | BytecodeStackKind::Boolean | BytecodeStackKind::Undefined | BytecodeStackKind::Null,
+                        ) => {
                             stack.push(BytecodeStackKind::Boolean);
                         }
                         _ => {
@@ -607,18 +754,6 @@ impl JitEngine {
                         }
                     }
                     Opcode::JumpIfFalse | Opcode::JumpIfTrue => {
-                        if !matches!(stack.pop(), Some(BytecodeStackKind::Number | BytecodeStackKind::Boolean)) {
-                            return Ok(None);
-                        }
-                    }
-                    Opcode::Jump => {}
-                    Opcode::Return => {
-                        if stack.len() != 1 || stack.pop() != Some(BytecodeStackKind::Number) {
-                            return Ok(None);
-                        }
-                        has_return = true;
-                    }
-                    Opcode::Throw => {
                         if !matches!(
                             stack.pop(),
                             Some(
@@ -630,7 +765,33 @@ impl JitEngine {
                         ) {
                             return Ok(None);
                         }
+                    }
+                    Opcode::Jump => {}
+                    Opcode::Return => {
+                        if stack.len() != 1 || stack.pop() != Some(BytecodeStackKind::Number) {
+                            return Ok(None);
+                        }
+                        has_return = true;
+                    }
+                    Opcode::Throw => {
+                        let Some(
+                            value_kind @ (BytecodeStackKind::Number
+                            | BytecodeStackKind::Boolean
+                            | BytecodeStackKind::Undefined
+                            | BytecodeStackKind::Null),
+                        ) = stack.pop()
+                        else {
+                            return Ok(None);
+                        };
                         if !instruction.exceptional_targets.is_empty() && (instruction.exceptional_targets.len() != 1 || !stack.is_empty())
+                        {
+                            return Ok(None);
+                        }
+                        if let Some(&target) = instruction.exceptional_targets.first()
+                            && catch_binding_locals.values().any(|(binding_target, _)| *binding_target == target)
+                            && catch_binding_kinds
+                                .insert(target, value_kind)
+                                .is_some_and(|existing| existing != value_kind)
                         {
                             return Ok(None);
                         }
@@ -639,7 +800,9 @@ impl JitEngine {
                         let binding =
                             u16::from_le_bytes([chunk.code[instruction.operand.start + 4], chunk.code[instruction.operand.start + 5]]);
                         let flags = chunk.code[instruction.operand.start + 6];
-                        if binding != u16::MAX || flags & 1 != 0 {
+                        if binding != u16::MAX && !matches!(chunk.constants.get(binding as usize), Some(crate::core::Value::String(_)))
+                            || flags & 1 != 0
+                        {
                             return Ok(None);
                         }
                     }
@@ -850,6 +1013,17 @@ impl JitEngine {
                             stack.push(builder.use_var(locals[local_index]));
                             stack_kinds.push(local_types[local_index].expect("bytecode local kinds were validated"));
                         }
+                        Opcode::GetGlobal => {
+                            let (target, local_index) = catch_binding_locals[&instruction.offset];
+                            let value_kind = catch_binding_kinds[&target];
+                            let exception_offset = std::mem::offset_of!(NativeJitFrame, exception) as i32;
+                            let payload_offset = exception_offset + std::mem::offset_of!(NativeJitValue, payload) as i32;
+                            let value =
+                                builder
+                                    .ins()
+                                    .load(bytecode_stack_type(value_kind), MemFlagsData::new(), frame_pointer, payload_offset);
+                            builder.def_var(locals[local_index], value);
+                        }
                         Opcode::GetUpvalue => {
                             let upvalue_index = chunk.code[instruction.operand.start] as usize;
                             let argument_index = candidate.params.len() + upvalue_index;
@@ -1005,9 +1179,7 @@ impl JitEngine {
                                     builder.ins().icmp_imm_s(IntCC::Equal, truthy, 0)
                                 }
                                 BytecodeStackKind::Boolean => builder.ins().icmp_imm_s(IntCC::Equal, value, 0),
-                                BytecodeStackKind::Undefined | BytecodeStackKind::Null => {
-                                    unreachable!("undefined/null truthiness was excluded by validation")
-                                }
+                                BytecodeStackKind::Undefined | BytecodeStackKind::Null => builder.ins().iconst(types::I8, 1),
                             };
                             let one = builder.ins().iconst(types::I8, 1);
                             let zero = builder.ins().iconst(types::I8, 0);
@@ -1032,9 +1204,7 @@ impl JitEngine {
                                     builder.ins().fcmp(FloatCC::OrderedNotEqual, condition, zero)
                                 }
                                 BytecodeStackKind::Boolean => builder.ins().icmp_imm_s(IntCC::NotEqual, condition, 0),
-                                BytecodeStackKind::Undefined | BytecodeStackKind::Null => {
-                                    unreachable!("undefined/null truthiness was excluded by validation")
-                                }
+                                BytecodeStackKind::Undefined | BytecodeStackKind::Null => builder.ins().iconst(types::I8, 0),
                             };
                             let target = bytecode_jump_target(chunk, instruction).expect("jump target was validated");
                             let fallthrough = native_blocks[&instruction.next_offset];
@@ -1069,38 +1239,38 @@ impl JitEngine {
                         Opcode::Throw => {
                             let value = stack.pop().expect("bytecode stack was validated");
                             let kind = stack_kinds.pop().expect("bytecode stack kinds were validated");
+                            let exception_offset = std::mem::offset_of!(NativeJitFrame, exception) as i32;
+                            let tag = match kind {
+                                BytecodeStackKind::Number => JitValueTag::Number,
+                                BytecodeStackKind::Boolean => JitValueTag::Boolean,
+                                BytecodeStackKind::Undefined => JitValueTag::Undefined,
+                                BytecodeStackKind::Null => JitValueTag::Null,
+                            };
+                            let tag = builder.ins().iconst(types::I32, tag as i64);
+                            builder.ins().store(
+                                MemFlagsData::new(),
+                                tag,
+                                frame_pointer,
+                                exception_offset + std::mem::offset_of!(NativeJitValue, tag) as i32,
+                            );
+                            let payload_offset = exception_offset + std::mem::offset_of!(NativeJitValue, payload) as i32;
+                            match kind {
+                                BytecodeStackKind::Number => {
+                                    builder.ins().store(MemFlagsData::new(), value, frame_pointer, payload_offset);
+                                }
+                                BytecodeStackKind::Boolean => {
+                                    let payload = builder.ins().uextend(types::I64, value);
+                                    builder.ins().store(MemFlagsData::new(), payload, frame_pointer, payload_offset);
+                                }
+                                BytecodeStackKind::Undefined | BytecodeStackKind::Null => {
+                                    let payload = builder.ins().iconst(types::I64, 0);
+                                    builder.ins().store(MemFlagsData::new(), payload, frame_pointer, payload_offset);
+                                }
+                            }
                             if let Some(target) = instruction.exceptional_targets.first() {
                                 let arguments = stack.iter().copied().map(BlockArg::Value).collect::<Vec<_>>();
                                 builder.ins().jump(native_blocks[target], &arguments);
                             } else {
-                                let exception_offset = std::mem::offset_of!(NativeJitFrame, exception) as i32;
-                                let tag = match kind {
-                                    BytecodeStackKind::Number => JitValueTag::Number,
-                                    BytecodeStackKind::Boolean => JitValueTag::Boolean,
-                                    BytecodeStackKind::Undefined => JitValueTag::Undefined,
-                                    BytecodeStackKind::Null => JitValueTag::Null,
-                                };
-                                let tag = builder.ins().iconst(types::I32, tag as i64);
-                                builder.ins().store(
-                                    MemFlagsData::new(),
-                                    tag,
-                                    frame_pointer,
-                                    exception_offset + std::mem::offset_of!(NativeJitValue, tag) as i32,
-                                );
-                                let payload_offset = exception_offset + std::mem::offset_of!(NativeJitValue, payload) as i32;
-                                match kind {
-                                    BytecodeStackKind::Number => {
-                                        builder.ins().store(MemFlagsData::new(), value, frame_pointer, payload_offset);
-                                    }
-                                    BytecodeStackKind::Boolean => {
-                                        let payload = builder.ins().uextend(types::I64, value);
-                                        builder.ins().store(MemFlagsData::new(), payload, frame_pointer, payload_offset);
-                                    }
-                                    BytecodeStackKind::Undefined | BytecodeStackKind::Null => {
-                                        let payload = builder.ins().iconst(types::I64, 0);
-                                        builder.ins().store(MemFlagsData::new(), payload, frame_pointer, payload_offset);
-                                    }
-                                }
                                 let threw = builder.ins().iconst(types::I32, NativeJitStatus::Threw as i64);
                                 builder.ins().return_(&[threw]);
                             }
@@ -1364,6 +1534,13 @@ fn supports_inline_numeric_expression(expression: &Expr, analysis: &JitAnalysis)
     match expression {
         Expr::Number(_) => true,
         Expr::Var(name, ..) => analysis.is_number(name),
+        Expr::Call(callee, arguments) if is_math_abs_call(callee) => {
+            !analysis.locals.contains("Math")
+                && arguments.len() == 1
+                && arguments
+                    .iter()
+                    .all(|argument| supports_inline_numeric_expression(argument, analysis))
+        }
         Expr::Binary(left, op, right) => {
             matches!(
                 op,
@@ -1445,6 +1622,139 @@ fn collect_inline_dependencies_from_statement(
     }
 }
 
+fn collect_builtin_dependencies_from_statement(statement: &Statement, dependencies: &mut HashSet<String>) {
+    match &*statement.kind {
+        StatementKind::Let(declarations) | StatementKind::Var(declarations) => {
+            for (_, initializer) in declarations {
+                if let Some(initializer) = initializer {
+                    collect_builtin_dependencies_from_expression(initializer, dependencies);
+                }
+            }
+        }
+        StatementKind::Const(declarations) => {
+            for (_, initializer) in declarations {
+                collect_builtin_dependencies_from_expression(initializer, dependencies);
+            }
+        }
+        StatementKind::Assign(_, expression) | StatementKind::Expr(expression) | StatementKind::Throw(expression) => {
+            collect_builtin_dependencies_from_expression(expression, dependencies)
+        }
+        StatementKind::Return(Some(expression)) => collect_builtin_dependencies_from_expression(expression, dependencies),
+        StatementKind::If(if_statement) => {
+            collect_builtin_dependencies_from_expression(&if_statement.condition, dependencies);
+            for statement in &if_statement.then_body {
+                collect_builtin_dependencies_from_statement(statement, dependencies);
+            }
+            if let Some(else_body) = &if_statement.else_body {
+                for statement in else_body {
+                    collect_builtin_dependencies_from_statement(statement, dependencies);
+                }
+            }
+        }
+        StatementKind::For(for_statement) => {
+            if let Some(init) = &for_statement.init {
+                collect_builtin_dependencies_from_statement(init, dependencies);
+            }
+            if let Some(test) = &for_statement.test {
+                collect_builtin_dependencies_from_expression(test, dependencies);
+            }
+            if let Some(update) = &for_statement.update {
+                collect_builtin_dependencies_from_statement(update, dependencies);
+            }
+            for statement in &for_statement.body {
+                collect_builtin_dependencies_from_statement(statement, dependencies);
+            }
+        }
+        StatementKind::Block(statements) => {
+            for statement in statements {
+                collect_builtin_dependencies_from_statement(statement, dependencies);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_builtin_dependencies_from_expression(expression: &Expr, dependencies: &mut HashSet<String>) {
+    match expression {
+        Expr::Call(callee, arguments) => {
+            if is_math_abs_call(callee) {
+                dependencies.insert("abs".to_string());
+            }
+            collect_builtin_dependencies_from_expression(callee, dependencies);
+            for argument in arguments {
+                collect_builtin_dependencies_from_expression(argument, dependencies);
+            }
+        }
+        Expr::Assign(left, right)
+        | Expr::Binary(left, _, right)
+        | Expr::LogicalAnd(left, right)
+        | Expr::LogicalOr(left, right)
+        | Expr::NullishCoalescing(left, right)
+        | Expr::Mod(left, right)
+        | Expr::Pow(left, right)
+        | Expr::AddAssign(left, right)
+        | Expr::SubAssign(left, right)
+        | Expr::PowAssign(left, right)
+        | Expr::MulAssign(left, right)
+        | Expr::DivAssign(left, right)
+        | Expr::ModAssign(left, right)
+        | Expr::BitXorAssign(left, right)
+        | Expr::BitAndAssign(left, right)
+        | Expr::BitOrAssign(left, right)
+        | Expr::LeftShiftAssign(left, right)
+        | Expr::RightShiftAssign(left, right)
+        | Expr::UnsignedRightShiftAssign(left, right)
+        | Expr::Index(left, right)
+        | Expr::OptionalIndex(left, right) => {
+            collect_builtin_dependencies_from_expression(left, dependencies);
+            collect_builtin_dependencies_from_expression(right, dependencies);
+        }
+        Expr::Conditional(condition, then_expression, else_expression) => {
+            collect_builtin_dependencies_from_expression(condition, dependencies);
+            collect_builtin_dependencies_from_expression(then_expression, dependencies);
+            collect_builtin_dependencies_from_expression(else_expression, dependencies);
+        }
+        Expr::UnaryNeg(inner)
+        | Expr::UnaryPlus(inner)
+        | Expr::BitNot(inner)
+        | Expr::Increment(inner)
+        | Expr::Decrement(inner)
+        | Expr::PostIncrement(inner)
+        | Expr::PostDecrement(inner)
+        | Expr::Property(inner, _)
+        | Expr::OptionalProperty(inner, _)
+        | Expr::OptionalPrivateMember(inner, _)
+        | Expr::PrivateMember(inner, _)
+        | Expr::TypeOf(inner)
+        | Expr::Delete(inner)
+        | Expr::Void(inner)
+        | Expr::Await(inner)
+        | Expr::YieldStar(inner)
+        | Expr::LogicalNot(inner)
+        | Expr::New(inner, _)
+        | Expr::Spread(inner) => collect_builtin_dependencies_from_expression(inner, dependencies),
+        Expr::OptionalCall(callee, arguments) => {
+            collect_builtin_dependencies_from_expression(callee, dependencies);
+            for argument in arguments {
+                collect_builtin_dependencies_from_expression(argument, dependencies);
+            }
+        }
+        Expr::Yield(Some(inner)) => collect_builtin_dependencies_from_expression(inner, dependencies),
+        Expr::Object(entries) => {
+            for (key, value, _, _) in entries {
+                collect_builtin_dependencies_from_expression(key, dependencies);
+                collect_builtin_dependencies_from_expression(value, dependencies);
+            }
+        }
+        Expr::Array(elements) => {
+            for element in elements.iter().flatten() {
+                collect_builtin_dependencies_from_expression(element, dependencies);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn collect_inline_dependencies_from_expression(
     expression: &Expr,
     inline_functions: &HashMap<String, InlineFunction>,
@@ -1494,6 +1804,10 @@ fn collect_inline_dependencies_from_expression(
         }
         _ => {}
     }
+}
+
+fn is_math_abs_call(callee: &Expr) -> bool {
+    matches!(callee, Expr::Property(base, property) if property == "abs" && matches!(&**base, Expr::Var(name, ..) if name == "Math"))
 }
 
 fn simple_parameters(params: &[DestructuringElement]) -> Option<Vec<String>> {
@@ -1550,6 +1864,7 @@ fn is_supported_function(params: &[String], body: &[Statement], inline_functions
             | Expr::Mod(..)
             | Expr::UnaryNeg(..)
             | Expr::UnaryPlus(..)
+            | Expr::Call(..)
             | Expr::Property(..)
             | Expr::Index(..)
     ) && supports_expression(expression, &analysis);
@@ -1869,6 +2184,11 @@ fn supports_expression(expression: &Expr, analysis: &JitAnalysis) -> bool {
             }
         }
         Expr::Call(callee, arguments) => {
+            if is_math_abs_call(callee) {
+                return !analysis.locals.contains("Math")
+                    && arguments.len() == 1
+                    && arguments.iter().all(|argument| supports_expression(argument, analysis));
+            }
             let Expr::Var(name, ..) = &**callee else {
                 return false;
             };
@@ -2134,6 +2454,15 @@ impl FunctionCompiler<'_, '_> {
                 Ok(JitValue::Number(self.read_lvalue(&target)))
             }
             Expr::Call(callee, arguments) => {
+                if is_math_abs_call(callee) {
+                    if self.locals.contains_key("Math") || arguments.len() != 1 {
+                        return Err("Math.abs requires the unshadowed Math global and one numeric argument".to_string());
+                    }
+                    let JitValue::Number(argument) = self.compile_expression(&arguments[0])? else {
+                        return Err("Math.abs requires a numeric argument".to_string());
+                    };
+                    return Ok(JitValue::Number(self.builder.ins().fabs(argument)));
+                }
                 let Expr::Var(name, ..) = &**callee else {
                     return Err("only statically known numeric calls can be inlined".to_string());
                 };

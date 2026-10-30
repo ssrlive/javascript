@@ -13,6 +13,7 @@ const DIRECT_NATIVE_OPCODES: &[&str] = &[
     "Div",
     "Pop",
     "GetLocal",
+    "GetGlobal",
     "GetUpvalue",
     "SetLocal",
     "SetUpvalue",
@@ -59,6 +60,7 @@ const AST_NATIVE_OPCODES: &[&str] = &[
     "GetIndex",
     "SetIndex",
 ];
+const DIRECT_NATIVE_BUILTINS: &[&str] = &["BUILTIN_MATH_ABS"];
 
 #[test]
 fn report_opcode_and_builtin_jit_coverage_by_semantic_family() {
@@ -95,6 +97,12 @@ fn report_opcode_and_builtin_jit_coverage_by_semantic_family() {
     for opcode in AST_NATIVE_OPCODES {
         assert!(opcodes.iter().any(|name| name == opcode), "stale AST-native opcode entry: {opcode}");
     }
+    for builtin in DIRECT_NATIVE_BUILTINS {
+        assert!(
+            builtins.iter().any(|(name, _)| name == builtin),
+            "stale native builtin entry: {builtin}"
+        );
+    }
 
     println!("JIT coverage audit by semantic family");
     for opcode in opcodes {
@@ -103,10 +111,19 @@ fn report_opcode_and_builtin_jit_coverage_by_semantic_family() {
         println!("opcode {opcode} [{family}]: {status} ({detail})");
     }
     for (name, _) in builtins {
-        println!(
-            "builtin {name} [{}]: uncovered (not dispatched from native JIT)",
-            builtin_family(&name)
-        );
+        let (status, detail) = builtin_status(&name);
+        println!("builtin {name} [{}]: {status} ({detail})", builtin_family(&name));
+    }
+}
+
+fn builtin_status(name: &str) -> (&'static str, &'static str) {
+    if DIRECT_NATIVE_BUILTINS.contains(&name) {
+        (
+            "native",
+            "numeric Math.abs inlining guarded by the runtime Math.abs builtin identity",
+        )
+    } else {
+        ("uncovered", "not dispatched from native JIT")
     }
 }
 
@@ -121,12 +138,17 @@ fn opcode_status(name: &str) -> (&'static str, &'static str) {
     } else if matches!(name, "SetupTry" | "TeardownTry") {
         (
             "native",
-            "no-binding/no-finally local handlers for verified Number/Boolean/Undefined/Null throws",
+            "no-finally local handlers; catch identifiers require a consistent primitive type and verifiable next-local slot",
         )
     } else if name == "Return" {
         ("native", "numeric results plus opaque tagged identity values")
     } else if name == "GetLocal" {
         ("native", "numeric/boolean locals plus tagged identity passthrough")
+    } else if name == "GetGlobal" {
+        (
+            "native",
+            "catch-parameter initialization for consistent primitive values in a verified local slot",
+        )
     } else if name == "GetUpvalue" {
         ("native", "numeric captures loaded through the traced closure-cell ABI")
     } else if name == "SetUpvalue" {

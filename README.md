@@ -115,10 +115,13 @@ Options:
 
 Enable the experimental Cranelift JIT with `--features jit`. It compiles eligible
 ordinary function declarations that use numeric parameters and supported local
-arithmetic, comparisons, and `for` loops. The generated function is used after
-its second call when all arguments are numbers. Unsupported functions, methods,
-closures, and calls with non-numeric arguments continue to use the interpreter.
-This is an experimental MVP, not a general-purpose optimizing JavaScript JIT.
+arithmetic, comparisons, and `for` loops. Straight-line numeric functions also
+have a direct bytecode-to-Cranelift path for constants, parameter locals,
+arithmetic, and numeric returns. Other eligible functions still use the
+restricted AST backend. The generated function is used after its second call
+when all arguments are numbers. Unsupported functions, methods, closures, and
+calls with non-numeric arguments continue to use the interpreter. This is an
+experimental MVP, not a general-purpose optimizing JavaScript JIT.
 
 For JIT tests, call `JsRuntime::set_jit_required(true)` to require ordinary
 JavaScript function calls to use compiled code immediately. Unsupported
@@ -141,8 +144,11 @@ cargo build --release --example js-rs --features jit
 ```
 
 The coverage test prints a row for every bytecode opcode and built-in function.
-The current JIT compiles a restricted AST subset, not bytecode opcodes, and does
-not compile built-ins; those rows are therefore reported as interpreter-only.
+Only the listed numeric bytecode operations and validated branches are
+partially lowered; other bytecode operations and all built-ins remain
+interpreter-only. The lowering accepts only numeric locals, comparison results,
+and compatible operand-stack merges; exceptional control flow and general
+JavaScript value semantics are not yet native.
 
 ## REPL behavior
 

@@ -1,13 +1,15 @@
-use crate::core::{BinaryOp, Chunk, DestructuringElement, Expr, Statement, StatementKind};
+use crate::core::{BinaryOp, Chunk, DestructuringElement, Expr, Opcode, Statement, StatementKind};
 use crate::host_api::{JitValue as NativeJitValue, JitValueTag, NativeJitFrame, NativeJitFunction, NativeJitRegistration, NativeJitStatus};
 use cranelift_codegen::ir::{
-    AbiParam, FuncRef, Function as ClifFunction, InstBuilder, MemFlagsData, UserFuncName, condcodes::FloatCC, types,
+    AbiParam, BlockArg, FuncRef, Function as ClifFunction, InstBuilder, MemFlagsData, UserFuncName,
+    condcodes::{FloatCC, IntCC},
+    types,
 };
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module, default_libcall_names};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 mod bytecode;
 
@@ -38,6 +40,24 @@ enum JitValue {
     Boolean(cranelift_codegen::ir::Value),
     Array(Vec<Variable>),
     Object(HashMap<String, Variable>),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BytecodeStackKind {
+    Number,
+    Boolean,
+}
+
+fn bytecode_stack_type(kind: BytecodeStackKind) -> cranelift_codegen::ir::Type {
+    match kind {
+        BytecodeStackKind::Number => types::F64,
+        BytecodeStackKind::Boolean => types::I8,
+    }
+}
+
+fn bytecode_jump_target(chunk: &Chunk<'_>, instruction: &bytecode::DecodedInstruction) -> Option<usize> {
+    let bytes: [u8; 4] = chunk.code.get(instruction.operand.clone())?.try_into().ok()?;
+    Some(u32::from_le_bytes(bytes) as usize)
 }
 
 #[derive(Clone)]
@@ -159,9 +179,22 @@ impl JitEngine {
 
         let mut compiled = Vec::new();
         for candidate in candidates {
-            match self.compile_function(&candidate, &inline_functions) {
-                Ok(function) => {
-                    log::debug!("JIT compiled function {} at bytecode offset {}", candidate.name, candidate.ip);
+            let bytecode_result = self.compile_bytecode_function(&candidate, &cfg, chunk);
+            let compilation = match bytecode_result {
+                Ok(Some(function)) => Ok((function, true)),
+                Ok(None) => self
+                    .compile_function(&candidate, &inline_functions)
+                    .map(|function| (function, false)),
+                Err(error) => Err(error),
+            };
+            match compilation {
+                Ok((function, from_bytecode)) => {
+                    let source = if from_bytecode { "bytecode" } else { "AST" };
+                    log::debug!(
+                        "JIT compiled function {} from {source} at bytecode offset {}",
+                        candidate.name,
+                        candidate.ip
+                    );
                     compiled.push((function, candidate.dependencies));
                 }
                 Err(error) => log::warn!("JIT skipped function {}: {error}", candidate.name),
@@ -186,6 +219,368 @@ impl JitEngine {
                 }
             })
             .collect()
+    }
+
+    fn compile_bytecode_function(
+        &mut self,
+        candidate: &FunctionCandidate<'_>,
+        cfg: &bytecode::ControlFlowGraph,
+        chunk: &Chunk<'_>,
+    ) -> Result<Option<(usize, usize, FuncId)>, String> {
+        let Some(entry_index) = cfg.blocks.iter().position(|block| block.start == candidate.ip) else {
+            return Ok(None);
+        };
+
+        let block_indices = cfg
+            .blocks
+            .iter()
+            .enumerate()
+            .map(|(index, block)| (block.start, index))
+            .collect::<HashMap<_, _>>();
+        let other_function_entries = chunk
+            .fn_names
+            .keys()
+            .copied()
+            .filter(|entry| *entry != candidate.ip)
+            .collect::<HashSet<_>>();
+        let mut incoming_stacks = vec![None::<Vec<BytecodeStackKind>>; cfg.blocks.len()];
+        let mut worklist = VecDeque::from([entry_index]);
+        let mut reachable_blocks = Vec::new();
+        let mut has_return = false;
+        incoming_stacks[entry_index] = Some(Vec::new());
+
+        while let Some(block_index) = worklist.pop_front() {
+            let block = &cfg.blocks[block_index];
+            if !block.exceptional_successors.is_empty() {
+                return Ok(None);
+            }
+            reachable_blocks.push(block_index);
+            let mut stack = incoming_stacks[block_index]
+                .clone()
+                .expect("reachable blocks have an incoming stack");
+            let instructions = &cfg.instructions[block.instruction_range.clone()];
+            for instruction in instructions {
+                if !instruction.exceptional_targets.is_empty() {
+                    return Ok(None);
+                }
+                match instruction.opcode {
+                    Opcode::Constant => {
+                        let constant_index =
+                            u16::from_le_bytes([chunk.code[instruction.operand.start], chunk.code[instruction.operand.start + 1]]) as usize;
+                        if !matches!(chunk.constants.get(constant_index), Some(crate::core::Value::Number(_))) {
+                            return Ok(None);
+                        }
+                        stack.push(BytecodeStackKind::Number);
+                    }
+                    Opcode::GetLocal => {
+                        let local_index = chunk.code[instruction.operand.start] as usize;
+                        if local_index >= candidate.params.len() {
+                            return Ok(None);
+                        }
+                        stack.push(BytecodeStackKind::Number);
+                    }
+                    Opcode::SetLocal => {
+                        let local_index = chunk.code[instruction.operand.start] as usize;
+                        if local_index >= candidate.params.len() || stack.last() != Some(&BytecodeStackKind::Number) {
+                            return Ok(None);
+                        }
+                    }
+                    Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div | Opcode::Mod => {
+                        if stack.pop() != Some(BytecodeStackKind::Number) || stack.pop() != Some(BytecodeStackKind::Number) {
+                            return Ok(None);
+                        }
+                        stack.push(BytecodeStackKind::Number);
+                    }
+                    Opcode::LessThan
+                    | Opcode::GreaterThan
+                    | Opcode::LessEqual
+                    | Opcode::GreaterEqual
+                    | Opcode::Equal
+                    | Opcode::NotEqual
+                    | Opcode::StrictNotEqual => {
+                        if stack.pop() != Some(BytecodeStackKind::Number) || stack.pop() != Some(BytecodeStackKind::Number) {
+                            return Ok(None);
+                        }
+                        stack.push(BytecodeStackKind::Boolean);
+                    }
+                    Opcode::Negate => {
+                        if stack.last() != Some(&BytecodeStackKind::Number) {
+                            return Ok(None);
+                        }
+                    }
+                    Opcode::Pop => {
+                        if stack.pop().is_none() {
+                            return Ok(None);
+                        }
+                    }
+                    Opcode::JumpIfFalse | Opcode::JumpIfTrue => {
+                        if stack.pop().is_none() {
+                            return Ok(None);
+                        }
+                    }
+                    Opcode::Jump => {}
+                    Opcode::Return => {
+                        if stack.len() != 1 || stack.pop() != Some(BytecodeStackKind::Number) {
+                            return Ok(None);
+                        }
+                        has_return = true;
+                    }
+                    _ => return Ok(None),
+                }
+            }
+
+            let Some(last) = instructions.last() else {
+                return Ok(None);
+            };
+            if last.opcode == Opcode::Return {
+                if !block.successors.is_empty() {
+                    return Ok(None);
+                }
+                continue;
+            }
+            if block.successors.is_empty() {
+                return Ok(None);
+            }
+            if matches!(last.opcode, Opcode::JumpIfFalse | Opcode::JumpIfTrue) {
+                let Some(target) = bytecode_jump_target(chunk, last) else {
+                    return Ok(None);
+                };
+                if !block.successors.contains(&target) || !block.successors.contains(&last.next_offset) {
+                    return Ok(None);
+                }
+            } else if block.successors.len() != 1 {
+                return Ok(None);
+            }
+
+            for target in &block.successors {
+                if other_function_entries.contains(target) {
+                    return Ok(None);
+                }
+                let Some(&target_index) = block_indices.get(target) else {
+                    return Ok(None);
+                };
+                match &incoming_stacks[target_index] {
+                    Some(existing) if existing != &stack => return Ok(None),
+                    Some(_) => {}
+                    None => {
+                        incoming_stacks[target_index] = Some(stack.clone());
+                        worklist.push_back(target_index);
+                    }
+                }
+            }
+        }
+
+        if !has_return {
+            return Ok(None);
+        }
+
+        let function_name = format!("js_{}_{}", self.next_function_id, candidate.name);
+        self.next_function_id += 1;
+        let pointer_type = self.module.target_config().pointer_type();
+        let mut signature = self.module.make_signature();
+        signature.params.push(AbiParam::new(pointer_type));
+        signature.returns.push(AbiParam::new(types::I32));
+        let function_id = self
+            .module
+            .declare_function(&function_name, Linkage::Local, &signature)
+            .map_err(|error| error.to_string())?;
+        let mut context = self.module.make_context();
+        context.func = ClifFunction::with_name_signature(UserFuncName::user(0, function_id.as_u32()), signature);
+        let fmod_function = self.module.declare_func_in_func(self.fmod_function, &mut context.func);
+        let mut builder_context = FunctionBuilderContext::new();
+        {
+            let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_context);
+            let native_blocks = reachable_blocks
+                .iter()
+                .map(|index| (cfg.blocks[*index].start, builder.create_block()))
+                .collect::<HashMap<_, _>>();
+            let entry = native_blocks[&candidate.ip];
+            builder.switch_to_block(entry);
+            builder.append_block_params_for_function_params(entry);
+            for kind in incoming_stacks[entry_index].as_ref().expect("entry stack was validated") {
+                builder.append_block_param(entry, bytecode_stack_type(*kind));
+            }
+            for block_index in reachable_blocks.iter().copied().filter(|index| *index != entry_index) {
+                let block = native_blocks[&cfg.blocks[block_index].start];
+                for kind in incoming_stacks[block_index].as_ref().expect("reachable stack was validated") {
+                    builder.append_block_param(block, bytecode_stack_type(*kind));
+                }
+            }
+
+            let frame_pointer = builder.block_params(entry)[0];
+            let arguments_pointer = builder.ins().load(
+                pointer_type,
+                MemFlagsData::new(),
+                frame_pointer,
+                std::mem::offset_of!(NativeJitFrame, arguments) as i32,
+            );
+            let mut locals = Vec::with_capacity(candidate.params.len());
+            for index in 0..candidate.params.len() {
+                let argument = builder.ins().load(
+                    types::F64,
+                    MemFlagsData::new(),
+                    arguments_pointer,
+                    (index * std::mem::size_of::<NativeJitValue>() + std::mem::offset_of!(NativeJitValue, payload)) as i32,
+                );
+                let local = builder.declare_var(types::F64);
+                builder.def_var(local, argument);
+                locals.push(local);
+            }
+
+            for (position, block_index) in reachable_blocks.iter().copied().enumerate() {
+                let bytecode_block = &cfg.blocks[block_index];
+                let native_block = native_blocks[&bytecode_block.start];
+                if position != 0 {
+                    builder.switch_to_block(native_block);
+                }
+                let parameter_offset = usize::from(block_index == entry_index);
+                let mut stack = builder.block_params(native_block)[parameter_offset..].to_vec();
+                let mut stack_kinds = incoming_stacks[block_index].clone().expect("reachable stack was validated");
+                let instructions = &cfg.instructions[bytecode_block.instruction_range.clone()];
+                for instruction in instructions {
+                    match instruction.opcode {
+                        Opcode::Constant => {
+                            let constant_index =
+                                u16::from_le_bytes([chunk.code[instruction.operand.start], chunk.code[instruction.operand.start + 1]])
+                                    as usize;
+                            let crate::core::Value::Number(number) = chunk.constants[constant_index] else {
+                                unreachable!("bytecode numeric constants were validated");
+                            };
+                            stack.push(builder.ins().f64const(number));
+                            stack_kinds.push(BytecodeStackKind::Number);
+                        }
+                        Opcode::GetLocal => {
+                            let local_index = chunk.code[instruction.operand.start] as usize;
+                            stack.push(builder.use_var(locals[local_index]));
+                            stack_kinds.push(BytecodeStackKind::Number);
+                        }
+                        Opcode::SetLocal => {
+                            let local_index = chunk.code[instruction.operand.start] as usize;
+                            builder.def_var(locals[local_index], *stack.last().expect("bytecode stack was validated"));
+                        }
+                        Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div | Opcode::Mod => {
+                            let right = stack.pop().expect("bytecode stack was validated");
+                            let left = stack.pop().expect("bytecode stack was validated");
+                            let _ = stack_kinds.pop().expect("bytecode stack kinds were validated");
+                            let _ = stack_kinds.pop().expect("bytecode stack kinds were validated");
+                            let result = match instruction.opcode {
+                                Opcode::Add => builder.ins().fadd(left, right),
+                                Opcode::Sub => builder.ins().fsub(left, right),
+                                Opcode::Mul => builder.ins().fmul(left, right),
+                                Opcode::Div => builder.ins().fdiv(left, right),
+                                Opcode::Mod => {
+                                    let call = builder.ins().call(fmod_function, &[left, right]);
+                                    builder.inst_results(call)[0]
+                                }
+                                _ => unreachable!("matched numeric binary opcode"),
+                            };
+                            stack.push(result);
+                            stack_kinds.push(BytecodeStackKind::Number);
+                        }
+                        Opcode::LessThan
+                        | Opcode::GreaterThan
+                        | Opcode::LessEqual
+                        | Opcode::GreaterEqual
+                        | Opcode::Equal
+                        | Opcode::NotEqual
+                        | Opcode::StrictNotEqual => {
+                            let right = stack.pop().expect("bytecode stack was validated");
+                            let left = stack.pop().expect("bytecode stack was validated");
+                            let condition = match instruction.opcode {
+                                Opcode::LessThan => FloatCC::LessThan,
+                                Opcode::GreaterThan => FloatCC::GreaterThan,
+                                Opcode::LessEqual => FloatCC::LessThanOrEqual,
+                                Opcode::GreaterEqual => FloatCC::GreaterThanOrEqual,
+                                Opcode::Equal => FloatCC::Equal,
+                                Opcode::NotEqual | Opcode::StrictNotEqual => FloatCC::NotEqual,
+                                _ => unreachable!("matched numeric comparison opcode"),
+                            };
+                            let condition = builder.ins().fcmp(condition, left, right);
+                            let one = builder.ins().iconst(types::I8, 1);
+                            let zero = builder.ins().iconst(types::I8, 0);
+                            stack.push(builder.ins().select(condition, one, zero));
+                            let _ = stack_kinds.pop().expect("bytecode stack kinds were validated");
+                            let _ = stack_kinds.pop().expect("bytecode stack kinds were validated");
+                            stack_kinds.push(BytecodeStackKind::Boolean);
+                        }
+                        Opcode::Negate => {
+                            let value = stack.pop().expect("bytecode stack was validated");
+                            stack.push(builder.ins().fneg(value));
+                            let _ = stack_kinds.pop().expect("bytecode stack kinds were validated");
+                            stack_kinds.push(BytecodeStackKind::Number);
+                        }
+                        Opcode::Pop => {
+                            stack.pop().expect("bytecode stack was validated");
+                            let _ = stack_kinds.pop().expect("bytecode stack kinds were validated");
+                        }
+                        Opcode::Jump => {
+                            let target = bytecode_jump_target(chunk, instruction).expect("jump target was validated");
+                            let arguments = stack.iter().copied().map(BlockArg::Value).collect::<Vec<_>>();
+                            builder.ins().jump(native_blocks[&target], &arguments);
+                        }
+                        Opcode::JumpIfFalse | Opcode::JumpIfTrue => {
+                            let condition = stack.pop().expect("bytecode stack was validated");
+                            let condition_kind = stack_kinds.pop().expect("bytecode stack kinds were validated");
+                            let condition = match condition_kind {
+                                BytecodeStackKind::Number => {
+                                    let zero = builder.ins().f64const(0.0);
+                                    builder.ins().fcmp(FloatCC::OrderedNotEqual, condition, zero)
+                                }
+                                BytecodeStackKind::Boolean => builder.ins().icmp_imm_s(IntCC::NotEqual, condition, 0),
+                            };
+                            let target = bytecode_jump_target(chunk, instruction).expect("jump target was validated");
+                            let fallthrough = native_blocks[&instruction.next_offset];
+                            let target = native_blocks[&target];
+                            let arguments = stack.iter().copied().map(BlockArg::Value).collect::<Vec<_>>();
+                            if instruction.opcode == Opcode::JumpIfFalse {
+                                builder.ins().brif(condition, fallthrough, &arguments, target, &arguments);
+                            } else {
+                                builder.ins().brif(condition, target, &arguments, fallthrough, &arguments);
+                            }
+                        }
+                        Opcode::Return => {
+                            let value = stack.pop().expect("bytecode stack was validated");
+                            let _ = stack_kinds.pop().expect("bytecode stack kinds were validated");
+                            let result_offset = std::mem::offset_of!(NativeJitFrame, result) as i32;
+                            let tag = builder.ins().iconst(types::I32, JitValueTag::Number as i64);
+                            builder.ins().store(
+                                MemFlagsData::new(),
+                                tag,
+                                frame_pointer,
+                                result_offset + std::mem::offset_of!(NativeJitValue, tag) as i32,
+                            );
+                            builder.ins().store(
+                                MemFlagsData::new(),
+                                value,
+                                frame_pointer,
+                                result_offset + std::mem::offset_of!(NativeJitValue, payload) as i32,
+                            );
+                            let returned = builder.ins().iconst(types::I32, NativeJitStatus::Returned as i64);
+                            builder.ins().return_(&[returned]);
+                        }
+                        _ => unreachable!("bytecode instruction set was validated"),
+                    }
+                }
+                let last = instructions.last().expect("basic blocks contain instructions");
+                if !matches!(
+                    last.opcode,
+                    Opcode::Jump | Opcode::JumpIfFalse | Opcode::JumpIfTrue | Opcode::Return
+                ) {
+                    let target = bytecode_block.successors[0];
+                    let arguments = stack.iter().copied().map(BlockArg::Value).collect::<Vec<_>>();
+                    builder.ins().jump(native_blocks[&target], &arguments);
+                }
+            }
+
+            builder.seal_all_blocks();
+            builder.finalize(self.module.target_config());
+        }
+        self.module
+            .define_function(function_id, &mut context)
+            .map_err(|error| error.to_string())?;
+        self.module.clear_context(&mut context);
+
+        Ok(Some((candidate.ip, candidate.params.len(), function_id)))
     }
 
     fn compile_function(
@@ -373,6 +768,17 @@ fn collect_inline_dependencies_from_statement(
         StatementKind::Assign(_, expression) | StatementKind::Expr(expression) => {
             collect_inline_dependencies_from_expression(expression, inline_functions, dependencies);
         }
+        StatementKind::If(if_statement) => {
+            collect_inline_dependencies_from_expression(&if_statement.condition, inline_functions, dependencies);
+            for statement in &if_statement.then_body {
+                collect_inline_dependencies_from_statement(statement, inline_functions, dependencies);
+            }
+            if let Some(else_body) = &if_statement.else_body {
+                for statement in else_body {
+                    collect_inline_dependencies_from_statement(statement, inline_functions, dependencies);
+                }
+            }
+        }
         StatementKind::For(for_statement) => {
             if let Some(init) = &for_statement.init {
                 collect_inline_dependencies_from_statement(init, inline_functions, dependencies);
@@ -539,6 +945,28 @@ fn supports_statement(statement: &Statement, analysis: &mut JitAnalysis) -> bool
                 && supports_expression(expression, analysis)
         }
         StatementKind::Expr(expression) => supports_expression(expression, analysis),
+        StatementKind::If(if_statement) => {
+            if !supports_expression(&if_statement.condition, analysis) {
+                return false;
+            }
+            let mut then_analysis = analysis.clone();
+            if !if_statement
+                .then_body
+                .iter()
+                .all(|statement| supports_branch_statement(statement, &mut then_analysis))
+            {
+                return false;
+            }
+            let mut else_analysis = analysis.clone();
+            if let Some(else_body) = &if_statement.else_body
+                && !else_body
+                    .iter()
+                    .all(|statement| supports_branch_statement(statement, &mut else_analysis))
+            {
+                return false;
+            }
+            true
+        }
         StatementKind::For(for_statement) => {
             let mut loop_analysis = analysis.clone();
             if let Some(init) = &for_statement.init
@@ -576,6 +1004,36 @@ fn supports_statement(statement: &Statement, analysis: &mut JitAnalysis) -> bool
                 .all(|statement| supports_statement(statement, &mut block_analysis))
         }
         StatementKind::Return(_) => false,
+        _ => false,
+    }
+}
+
+fn supports_branch_statement(statement: &Statement, analysis: &mut JitAnalysis) -> bool {
+    match &*statement.kind {
+        StatementKind::Assign(..) | StatementKind::Expr(..) => supports_statement(statement, analysis),
+        StatementKind::Block(statements) => statements.iter().all(|statement| supports_branch_statement(statement, analysis)),
+        StatementKind::If(if_statement) => {
+            if !supports_expression(&if_statement.condition, analysis) {
+                return false;
+            }
+            let mut then_analysis = analysis.clone();
+            if !if_statement
+                .then_body
+                .iter()
+                .all(|statement| supports_branch_statement(statement, &mut then_analysis))
+            {
+                return false;
+            }
+            let mut else_analysis = analysis.clone();
+            if let Some(else_body) = &if_statement.else_body
+                && !else_body
+                    .iter()
+                    .all(|statement| supports_branch_statement(statement, &mut else_analysis))
+            {
+                return false;
+            }
+            true
+        }
         _ => false,
     }
 }
@@ -1150,6 +1608,106 @@ impl FunctionCompiler<'_, '_> {
                 }
             }
             _ => Err("unsupported expression".to_string()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bytecode_lowerer_compiles_and_executes_numeric_addition() {
+        let chunk = Chunk {
+            code: vec![
+                Opcode::GetLocal as u8,
+                0,
+                Opcode::GetLocal as u8,
+                1,
+                Opcode::Add as u8,
+                Opcode::Return as u8,
+            ],
+            fn_names: HashMap::from([(0, "sum".to_string())]),
+            ..Chunk::default()
+        };
+        let cfg = bytecode::ControlFlowGraph::build(&chunk).unwrap();
+        let candidate = FunctionCandidate {
+            ip: 0,
+            name: "sum".to_string(),
+            params: vec!["left".to_string(), "right".to_string()],
+            body: &[],
+            dependencies: Vec::new(),
+        };
+        let mut engine = JitEngine::new().unwrap();
+        let (ip, arity, function_id) = engine.compile_bytecode_function(&candidate, &cfg, &chunk).unwrap().unwrap();
+        assert_eq!(ip, 0);
+        assert_eq!(arity, 2);
+
+        engine.module.finalize_definitions().unwrap();
+        let address = engine.module.get_finalized_function(function_id);
+        let function = unsafe { std::mem::transmute::<*const u8, NativeJitFunction>(address) };
+        let arguments = [NativeJitValue::number(19.0), NativeJitValue::number(23.0)];
+        let (status, result, _) = crate::host_api::invoke_native_jit(function, &arguments, 0).unwrap();
+
+        assert_eq!(status, NativeJitStatus::Returned);
+        assert_eq!(result.as_number(), Some(42.0));
+    }
+
+    #[test]
+    fn bytecode_lowerer_compiles_branches_and_merges_stack_values() {
+        let chunk = Chunk {
+            code: vec![
+                Opcode::GetLocal as u8,
+                0,
+                Opcode::JumpIfFalse as u8,
+                15,
+                0,
+                0,
+                0,
+                Opcode::Constant as u8,
+                0,
+                0,
+                Opcode::Jump as u8,
+                18,
+                0,
+                0,
+                0,
+                Opcode::Constant as u8,
+                1,
+                0,
+                Opcode::Return as u8,
+            ],
+            constants: vec![crate::core::Value::Number(42.0), crate::core::Value::Number(-1.0)],
+            fn_names: HashMap::from([(0, "choose".to_string())]),
+            ..Chunk::default()
+        };
+        let cfg = bytecode::ControlFlowGraph::build(&chunk).unwrap();
+        let candidate = FunctionCandidate {
+            ip: 0,
+            name: "choose".to_string(),
+            params: vec!["condition".to_string()],
+            body: &[],
+            dependencies: Vec::new(),
+        };
+        let mut engine = JitEngine::new().unwrap();
+        let (ip, arity, function_id) = engine.compile_bytecode_function(&candidate, &cfg, &chunk).unwrap().unwrap();
+        assert_eq!(ip, 0);
+        assert_eq!(arity, 1);
+
+        engine.module.finalize_definitions().unwrap();
+        let address = engine.module.get_finalized_function(function_id);
+        let function = unsafe { std::mem::transmute::<*const u8, NativeJitFunction>(address) };
+        let cases: [(f64, f64); 3] = [(7.0, 42.0), (0.0, -1.0), (f64::NAN, -1.0)];
+        for (argument, expected) in cases {
+            let arguments = [NativeJitValue::number(argument)];
+            let (status, result, _) = crate::host_api::invoke_native_jit(function, &arguments, 0).unwrap();
+            assert_eq!(status, NativeJitStatus::Returned);
+            let actual = result.as_number().unwrap();
+            if expected.is_nan() {
+                assert!(actual.is_nan());
+            } else {
+                assert_eq!(actual, expected);
+            }
         }
     }
 }

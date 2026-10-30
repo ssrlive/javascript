@@ -13,6 +13,28 @@ fn jit_required_mode_executes_compiled_functions_on_the_first_call() {
 }
 
 #[test]
+fn jit_required_mode_executes_numeric_comparison_branches() {
+    let mut runtime = JsRuntime::new();
+    runtime.set_jit_required(true);
+
+    let result = runtime
+        .eval(
+            r#"
+            function select(value) {
+                if (value > 0) {
+                    value = 42;
+                }
+                return value;
+            }
+            select(5) + select(-2);
+            "#,
+        )
+        .unwrap();
+
+    assert_eq!(result, JsValue::Number(40.0));
+}
+
+#[test]
 fn jit_compiles_functions_in_chunks_with_try_catch_and_finally() {
     let mut runtime = JsRuntime::new();
     runtime.set_jit_required(true);

@@ -4,6 +4,29 @@ use std::collections::HashSet;
 
 const OPCODE_SOURCE: &str = include_str!("../src/core/opcode.rs");
 const FUNCTION_ID_SOURCE: &str = include_str!("../src/core/function_id.rs");
+const NUMERIC_BYTECODE_OPCODES: &[&str] = &[
+    "Return",
+    "Constant",
+    "Add",
+    "Sub",
+    "Mul",
+    "Div",
+    "Pop",
+    "GetLocal",
+    "SetLocal",
+    "Negate",
+    "Mod",
+    "LessThan",
+    "GreaterThan",
+    "LessEqual",
+    "GreaterEqual",
+    "Equal",
+    "NotEqual",
+    "StrictNotEqual",
+    "Jump",
+    "JumpIfFalse",
+    "JumpIfTrue",
+];
 
 #[test]
 fn report_opcode_and_builtin_jit_coverage() {
@@ -29,9 +52,13 @@ fn report_opcode_and_builtin_jit_coverage() {
     );
 
     println!("JIT coverage audit");
-    println!("Current JIT compiles a restricted AST subset, not bytecode opcodes.");
+    println!("Partially lowered bytecode opcodes (numeric stack values and validated control flow):");
     for opcode in opcodes {
-        println!("opcode {opcode}: unsupported (no bytecode JIT translation)");
+        if NUMERIC_BYTECODE_OPCODES.contains(&opcode.as_str()) {
+            println!("opcode {opcode}: partial (numeric bytecode subset)");
+        } else {
+            println!("opcode {opcode}: unsupported (no bytecode JIT translation)");
+        }
     }
     for (name, _) in builtins {
         println!("builtin {name}: unsupported (runtime implementation only)");

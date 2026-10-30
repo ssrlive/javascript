@@ -127,11 +127,14 @@ when all arguments are numbers. Unsupported functions, methods, closures, and
 calls with non-numeric arguments continue to use the interpreter. This is an
 experimental MVP, not a general-purpose optimizing JavaScript JIT.
 
-For JIT tests, call `JsRuntime::set_jit_required(true)` to require ordinary
-JavaScript function calls to use compiled code immediately. Unsupported
-functions, methods, closures, tail/spread calls, and non-numeric arguments return
-an error instead of silently falling back; built-ins continue to use their
-runtime implementations.
+For JIT tests, call `JsRuntime::set_jit_required(true)` to require both top-level
+script bytecode and JavaScript function bodies to enter compiled code. Eligible
+numeric calls use the existing optimizing backend immediately. Other supported
+operations use a threaded baseline backend: Cranelift compiles blocks with
+opcode-specific VM semantic helper calls, not an interpreter dispatch loop.
+Methods, constructors, callbacks, closures, tagged values, and coercion side
+effects use the same VM semantics as the interpreter. This is helper-backed
+coverage, not a claim that those operations have optimized native lowering.
 
 The CLI accepts `--jit-required`, and the Test262 runner accepts the same mode
 for selected subsets, for example:
@@ -141,15 +144,44 @@ node ci/runner.js --jit-required --focus "language/expressions/addition"
 ```
 
 This is a strict diagnostic mode, not a claim that the full Test262 suite is
-JIT-compatible: uncovered functions intentionally fail instead of falling back.
+JIT-compatible. Unsupported baseline opcodes and compilation errors fail instead
+of falling back. The baseline table includes class heritage, prototypes, private
+brands, super access, generator suspension/delegation, and async/await. Suspension
+ends the native block; the VM's traced generator and async frames retain live
+values and exception handlers until resumption. The two reserved disposal opcodes
+remain explicitly unsupported (the compiler currently emits disposal inline).
+Built-ins retain their runtime implementations.
 
 JIT entries use a tagged call frame and an explicit return/throw/deopt/suspend
-status ABI. The current backend only emits numeric values. The VM traces values
-in active JIT argument-root frames, and JIT setup decodes bytecode into a
-validated control-flow graph with active exception-handler edges and handler
-state checks at control-flow merges. These edges are conservative; bytecode-to-
-machine-code translation, JS exception propagation from native code, and
-explicit GC safepoint callbacks are not implemented yet.
+status ABI. The optimizing backend supports scalar values and rooted identity
+passthrough, with restricted exception and closure paths. Baseline blocks keep
+all live JavaScript values in traced VM storage; they return at opcode-budget
+boundaries so incremental GC can run between slices. Pending throws, catch
+stack cleanup, and reentrant callbacks preserve VM behavior.
+`JsRuntime::jit_stats()` exposes baseline opcode, interpreter opcode, and
+optimized-call counters for verifying execution paths. With required JIT enabled
+from runtime creation, the interpreter opcode count must remain zero, including
+eval, retained child realms, and completed Test262 agents. Agent threads inherit
+the spawning VM's required-JIT setting; their counters are included after they
+finish, without double-counting nested agents.
+
+CI runs the JavaScript self-tests in both ordinary and required-JIT modes on
+Linux, Windows, and macOS. Required-JIT Test262 gates cover arithmetic, class
+statements/expressions, generators, yield, and await; an empty selection fails
+rather than passing vacuously. These gates retain the runner's strict-mode and
+feature-probe exclusions, so passing a selected suite is not full conformance.
+The `test262-all` workflow additionally runs both execution modes over the full
+`annexB,staging/decorators`, `intl402`, `built-ins`, and `language` selections.
+Each mode has separate result artifacts. The acceptance target is zero failures
+across all four selections, not just the smaller gates above.
+Set `TEST262_RESULTS_FILE` to retain distinct logs when running disjoint
+selections locally.
+
+```bash
+node ci/runner.js --jit-required --fail-on-failure --limit 100000 \
+  --focus "annexB,staging/decorators" --focus "intl402" \
+  --focus "built-ins" --focus "language"
+```
 
 ```bash
 cargo test --features jit --test jit_tests
@@ -158,11 +190,15 @@ cargo build --release --example js-rs --features jit
 ```
 
 The coverage test prints a row for every bytecode opcode and built-in function.
-Only the listed numeric bytecode operations and validated branches are
-partially lowered; other bytecode operations and all built-ins remain
-interpreter-only. The lowering accepts only numeric locals, comparison results,
-and compatible operand-stack merges; exceptional control flow and general
-JavaScript value semantics are not yet native.
+It distinguishes restricted native lowering, infrastructure, uncovered
+operations, and an explicit `baseline=helper-backed` marker. Generic builtin
+calls through baseline helpers do not count as specialized native builtin
+coverage.
+The audit requires an explicit baseline coverage decision for each opcode and
+review when the builtin inventory changes. Class and suspension bridges name
+their semantic regressions in the report. Helper-backed execution preserves
+existing VM behavior, including its limitations; for example, foreign class
+constructor `instanceof` is not generally correct even in interpreter mode.
 
 ## REPL behavior
 

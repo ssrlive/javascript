@@ -4,6 +4,39 @@ use std::collections::HashSet;
 
 const OPCODE_SOURCE: &str = include_str!("../src/core/opcode.rs");
 const FUNCTION_ID_SOURCE: &str = include_str!("../src/core/function_id.rs");
+const BASELINE_SOURCE: &str = include_str!("../src/core/vm/runner.rs");
+const UNCOVERED_BASELINE_OPCODES: &[&str] = &["DisposeResources", "DisposeResourcesAsync"];
+const BASELINE_SEMANTIC_TESTS: &[(&str, &[&str])] = &[
+    (
+        "jit_baseline_classes_preserve_super_receivers_and_descriptors",
+        &[
+            "ValidateClassHeritage",
+            "GetThisSuper",
+            "ClearThisTdz",
+            "ValidateProtoValue",
+            "EnterFieldInit",
+            "LeaveFieldInit",
+            "ResetPrototype",
+            "GetSuperProperty",
+            "GetSuperPropertyComputed",
+            "SetSuperProperty",
+            "SetSuperPropertyComputed",
+            "DefineComputedMethod",
+            "SetComputedClassGetter",
+            "SetComputedClassSetter",
+        ],
+    ),
+    ("jit_baseline_classes_preserve_heritage_errors_and_private_brands", &["AllocBrand"]),
+    (
+        "jit_baseline_generator_resume_throw_and_return_preserve_identity",
+        &["Yield", "GeneratorParamInitDone", "CheckGeneratorReturn", "SetGeneratorReturn"],
+    ),
+    (
+        "jit_baseline_generator_delegation_closes_iterators",
+        &["YieldDirect", "ClearGeneratorReturn"],
+    ),
+    ("jit_baseline_async_resumption_preserves_exceptions_and_microtask_order", &["Await"]),
+];
 const DIRECT_NATIVE_OPCODES: &[&str] = &[
     "Return",
     "Constant",
@@ -106,9 +139,15 @@ const INFRASTRUCTURE_MATH_BUILTINS: &[&str] = &[
 fn report_opcode_and_builtin_jit_coverage_by_semantic_family() {
     let opcodes = parse_opcodes(OPCODE_SOURCE);
     let builtins = parse_builtins(FUNCTION_ID_SOURCE);
+    let baseline_opcodes = parse_baseline_opcodes(BASELINE_SOURCE);
 
     assert!(!opcodes.is_empty(), "review the JIT coverage audit after changing the opcode set");
     assert!(!builtins.is_empty(), "review the JIT coverage audit after changing the builtin set");
+    assert_eq!(
+        builtins.len(),
+        331,
+        "builtin inventory changed: explicitly review coverage and add semantic tests before updating this gate"
+    );
     assert_eq!(
         opcodes.iter().collect::<HashSet<_>>().len(),
         opcodes.len(),
@@ -149,12 +188,53 @@ fn report_opcode_and_builtin_jit_coverage_by_semantic_family() {
             "stale infrastructure builtin entry: {builtin}"
         );
     }
+    assert!(!baseline_opcodes.is_empty(), "baseline helper audit must not be empty");
+    for opcode in &baseline_opcodes {
+        assert!(opcodes.iter().any(|name| name == opcode), "stale baseline opcode entry: {opcode}");
+    }
+    let uncovered = opcodes
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !baseline_opcodes.contains(name))
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        uncovered,
+        UNCOVERED_BASELINE_OPCODES.iter().copied().collect(),
+        "new opcodes need a baseline semantic bridge or an explicit uncovered decision"
+    );
+    let semantic_test_source = include_str!("jit_tests.rs");
+    for (test, names) in BASELINE_SEMANTIC_TESTS {
+        assert!(
+            semantic_test_source.contains(&format!("fn {test}(")),
+            "missing semantic regression: {test}"
+        );
+        for opcode in *names {
+            assert!(
+                baseline_opcodes.contains(opcode),
+                "semantic regression {test} refers to an uncovered opcode: {opcode}"
+            );
+        }
+    }
 
     println!("JIT coverage audit by semantic family");
+    println!("Baseline helpers reuse VM semantics; they are not specialized native implementations.");
     for opcode in opcodes {
         let family = opcode_family(&opcode);
-        let (status, detail) = opcode_status(&opcode);
-        println!("opcode {opcode} [{family}]: {status} ({detail})");
+        let (status, detail) = opcode_status(&opcode, &baseline_opcodes);
+        let baseline = if baseline_opcodes.contains(opcode.as_str()) {
+            "helper-backed"
+        } else {
+            "uncovered"
+        };
+        let semantic_tests = BASELINE_SEMANTIC_TESTS
+            .iter()
+            .filter(|(_, names)| names.contains(&opcode.as_str()))
+            .map(|(test, _)| *test)
+            .collect::<Vec<_>>();
+        println!(
+            "opcode {opcode} [{family}]: {status} ({detail}; baseline={baseline}; regressions={})",
+            semantic_tests.join(",")
+        );
     }
     for (name, _) in builtins {
         let (status, detail) = builtin_status(&name);
@@ -169,7 +249,7 @@ fn builtin_status(name: &str) -> (&'static str, &'static str) {
         if name == "BUILTIN_MATH_SUMPRECISE" {
             (
                 "infrastructure",
-                "precise summation for verified virtual numeric arrays; general iterables remain interpreter-only",
+                "precise summation for verified virtual numeric arrays; general iterables use VM helpers",
             )
         } else {
             (
@@ -178,11 +258,14 @@ fn builtin_status(name: &str) -> (&'static str, &'static str) {
             )
         }
     } else {
-        ("uncovered", "not dispatched from native JIT")
+        (
+            "uncovered",
+            "no specialized native dispatch; baseline Call may use the runtime builtin",
+        )
     }
 }
 
-fn opcode_status(name: &str) -> (&'static str, &'static str) {
+fn opcode_status(name: &str, baseline_opcodes: &HashSet<&str>) -> (&'static str, &'static str) {
     if name == "BoxLocal" {
         ("native", "elided for verified closure-free scalar locals")
     } else if name == "Throw" {
@@ -228,9 +311,28 @@ fn opcode_status(name: &str) -> (&'static str, &'static str) {
             "BitwiseNot" => ("infrastructure", "calls the shared JS ToInt32 helper"),
             _ => unreachable!("all infrastructure opcodes have a detail"),
         }
+    } else if baseline_opcodes.contains(name) {
+        ("infrastructure", "compiled baseline block invokes a VM semantic helper")
     } else {
         ("uncovered", "no native translation or JIT-to-VM bridge")
     }
+}
+
+fn parse_baseline_opcodes(source: &str) -> HashSet<&str> {
+    let table = source
+        .split_once("baseline_helpers! {")
+        .expect("baseline helper table must exist")
+        .1
+        .split_once("\n}")
+        .expect("baseline helper table must be closed")
+        .0;
+    let names = table
+        .lines()
+        .filter_map(|line| line.trim().split_once(" => ").map(|(name, _)| name))
+        .collect::<Vec<_>>();
+    let unique = names.iter().copied().collect::<HashSet<_>>();
+    assert_eq!(unique.len(), names.len(), "baseline opcode entries must be unique");
+    unique
 }
 
 fn opcode_family(name: &str) -> &'static str {

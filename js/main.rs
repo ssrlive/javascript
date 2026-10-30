@@ -14,6 +14,7 @@ const APP_NAME: &str = "js-rs";
 
 #[derive(clap::Parser)]
 #[command(name = APP_NAME, version, about = "JavaScript Rust Interpreter")]
+#[command(group(clap::ArgGroup::new("script_input").args(["eval", "file"]).multiple(true)))]
 struct Cli {
     /// Execute script
     #[arg(short, long)]
@@ -40,8 +41,8 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     module: bool,
 
-    /// Require ordinary JavaScript function calls to use compiled JIT code
-    #[arg(long, default_value_t = false)]
+    /// Require script and function bytecode to use compiled JIT code
+    #[arg(long, default_value_t = false, requires = "script_input")]
     jit_required: bool,
 }
 

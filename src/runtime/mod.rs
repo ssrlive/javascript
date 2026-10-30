@@ -4,7 +4,7 @@ mod evaluation;
 #[cfg(feature = "fs")]
 pub(crate) mod fs;
 #[cfg(feature = "jit")]
-mod jit;
+pub(crate) mod jit;
 #[cfg(any(feature = "process", feature = "os", feature = "fs"))]
 mod node_common;
 #[cfg(feature = "os")]
@@ -28,6 +28,15 @@ use std::rc::Rc;
 pub enum JsRunStatus {
     Yielded,
     Complete(JsValue),
+}
+
+/// Execution counters used to verify that required-JIT runs do not interpret opcodes.
+#[cfg(feature = "jit")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct JitStats {
+    pub baseline_opcodes: u64,
+    pub interpreter_opcodes: u64,
+    pub optimized_calls: u64,
 }
 
 /// Optional host integrations for runtime operations.
@@ -139,15 +148,26 @@ impl JsRuntime {
         self.gc_opcode_budget
     }
 
-    /// Require ordinary JavaScript function calls to execute through the JIT.
+    /// Require script and JavaScript function bytecode to execute through the JIT.
     ///
-    /// When enabled, a function that was not compiled by the JIT, is called
-    /// with unsupported arguments, or otherwise cannot enter native code
-    /// returns an error instead of silently falling back to the interpreter.
-    /// Built-in functions continue to use their existing runtime implementations.
+    /// Supported numeric calls use the optimizing backend; other supported
+    /// operations use compiled baseline blocks calling VM semantic helpers.
+    /// Unsupported baseline opcodes and compilation errors fail explicitly,
+    /// never falling back to the interpreter. Built-ins keep their runtime implementations.
     #[cfg(feature = "jit")]
     pub fn set_jit_required(&mut self, required: bool) {
         self.mutate_root(|_, vm| vm.set_jit_required(required));
+    }
+
+    /// Cumulative counters, including eval, retained child realms and completed agents.
+    #[cfg(feature = "jit")]
+    pub fn jit_stats(&mut self) -> JitStats {
+        let mut stats = self.mutate_root(|_, vm| vm.jit_stats());
+        let agent_stats = crate::js_agent::jit_stats(self.agent_context_id);
+        stats.baseline_opcodes += agent_stats.baseline_opcodes;
+        stats.interpreter_opcodes += agent_stats.interpreter_opcodes;
+        stats.optimized_calls += agent_stats.optimized_calls;
+        stats
     }
 
     /// Update the opcode budget between incremental GC safe points.

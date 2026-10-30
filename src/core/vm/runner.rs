@@ -27,6 +27,212 @@ struct NativeJitCallOptions<'a, 'gc> {
     upvalues: &'a [UpvalueCell<'gc>],
 }
 
+#[cfg(feature = "jit")]
+pub(crate) type BaselineBlock = unsafe extern "C" fn(*mut std::ffi::c_void);
+#[cfg(feature = "jit")]
+pub(crate) type BaselineHelper = unsafe extern "C" fn(*mut std::ffi::c_void, usize, usize) -> u8;
+
+#[cfg(feature = "jit")]
+struct BaselineState<'a, 'gc> {
+    vm: &'a mut VM<'gc>,
+    ctx: &'a GcContext<'gc>,
+    min_depth: usize,
+    budget: Option<usize>,
+    executed: usize,
+    outcome: Option<Result<RunInnerStatus<'gc>, JSError>>,
+}
+
+#[cfg(feature = "jit")]
+impl<'gc> BaselineState<'_, 'gc> {
+    fn step(
+        &mut self,
+        offset: usize,
+        next: usize,
+        execute: impl FnOnce(&mut VM<'gc>, &GcContext<'gc>, usize) -> Result<OpcodeAction<'gc>, JSError>,
+    ) -> u8 {
+        self.vm.current_opcode_ip = offset;
+        self.vm.ip = offset + 1;
+        let depth = self.vm.frames.len();
+        let action = execute(self.vm, self.ctx, self.min_depth);
+        self.executed += 1;
+        self.vm.jit_stats.baseline_opcodes += 1;
+        match action {
+            Err(error) => {
+                self.outcome = Some(Err(error));
+                return 0;
+            }
+            Ok(action) => {
+                if let Some(depth) = self.vm.throw_caught_stack_depth.take() {
+                    self.vm.stack.truncate(depth);
+                    return 0;
+                }
+                if let OpcodeAction::Exit(value) = action {
+                    self.outcome = Some(Ok(RunInnerStatus::Complete(value)));
+                    return 0;
+                }
+            }
+        }
+        u8::from(
+            self.vm.ip == next
+                && self.vm.frames.len() == depth
+                && self.vm.pending_throw.is_none()
+                && !self.vm.stop_requested
+                && !self.budget.is_some_and(|budget| self.executed >= budget),
+        )
+    }
+}
+
+// Each address names one semantic operation, not an interpreter dispatch loop.
+#[cfg(feature = "jit")]
+macro_rules! baseline_helpers {
+    (|$vm:ident, $ctx:ident, $depth:ident| $($opcode:ident => $body:expr),* $(,)?) => {
+        pub(crate) fn baseline_helper(opcode: Opcode) -> Option<BaselineHelper> {
+            match opcode {
+                $(Opcode::$opcode => Some($opcode),)*
+                Opcode::DisposeResources | Opcode::DisposeResourcesAsync => None,
+            }
+        }
+
+        $(
+            #[allow(non_snake_case)]
+            unsafe extern "C" fn $opcode(data: *mut std::ffi::c_void, offset: usize, next: usize) -> u8 {
+                // Only execute_baseline_block creates this pointer, and the native
+                // block cannot retain it beyond the synchronous call.
+                let state = unsafe { &mut *data.cast::<BaselineState<'_, '_>>() };
+                state.step(offset, next, |$vm, $ctx, $depth| {
+                    let _ = (&$ctx, &$depth);
+                    $body
+                })
+            }
+        )*
+    };
+}
+
+#[cfg(feature = "jit")]
+baseline_helpers! {
+    |vm, ctx, depth|
+    Return => vm.run_opcode_return(ctx, depth),
+    Yield => vm.run_opcode_yield(ctx),
+    YieldDirect => vm.run_opcode_yield_direct(ctx),
+    GeneratorParamInitDone => vm.run_opcode_generator_param_init_done(ctx),
+    Await => vm.run_opcode_await(ctx),
+    CheckGeneratorReturn => vm.run_opcode_check_generator_return(),
+    SetGeneratorReturn => vm.run_opcode_set_generator_return(),
+    ClearGeneratorReturn => vm.run_opcode_clear_generator_return(),
+    GetLocal => vm.run_opcode_get_local(ctx),
+    SetLocal => vm.run_opcode_set_local(ctx),
+    Call => vm.run_opcode_call(ctx, false),
+    TailCall => vm.run_opcode_call(ctx, true),
+    Constant => vm.run_opcode_constant(ctx),
+    Pop => vm.run_opcode_pop(ctx),
+    DefineGlobal => vm.run_opcode_define_global(ctx),
+    DefineGlobalSoft => vm.run_opcode_define_global_soft(ctx),
+    DefineGlobalConst => vm.run_opcode_define_global_const(ctx),
+    ThrowIfNullish => vm.run_opcode_throw_if_nullish(ctx),
+    ThrowIfNotConstructor => vm.run_opcode_throw_if_not_constructor(ctx),
+    GetNewTarget => vm.run_opcode_get_new_target(ctx),
+    GetGlobal => vm.run_opcode_get_global(ctx),
+    GetArguments => vm.run_opcode_get_arguments(ctx),
+    SetArguments => vm.run_opcode_set_arguments(ctx),
+    SetGlobal => vm.run_opcode_set_global(ctx),
+    Jump => vm.run_opcode_jump(ctx),
+    JumpIfFalse => vm.run_opcode_jump_if_false(ctx),
+    JumpIfTrue => vm.run_opcode_jump_if_true(ctx),
+    Add => vm.run_opcode_add(ctx),
+    Sub => vm.run_opcode_sub(ctx),
+    Mul => vm.run_opcode_mul(ctx),
+    Div => vm.run_opcode_div(ctx),
+    Mod => vm.run_opcode_mod(ctx),
+    Pow => vm.run_opcode_pow(ctx),
+    LessThan => vm.run_opcode_less_than(ctx),
+    GreaterThan => vm.run_opcode_greater_than(ctx),
+    Equal => vm.run_opcode_equal(ctx),
+    NotEqual => vm.run_opcode_not_equal(ctx),
+    StrictEqual => vm.run_opcode_strict_equal(ctx),
+    LessEqual => vm.run_opcode_less_equal(ctx),
+    GreaterEqual => vm.run_opcode_greater_equal(ctx),
+    BitwiseAnd => vm.run_opcode_bitwise_and(ctx),
+    BitwiseOr => vm.run_opcode_bitwise_or(ctx),
+    BitwiseXor => vm.run_opcode_bitwise_xor(ctx),
+    ShiftLeft => vm.run_opcode_shift_left(ctx),
+    ShiftRight => vm.run_opcode_shift_right(ctx),
+    UnsignedShiftRight => vm.run_opcode_unsigned_shift_right(ctx),
+    BitwiseNot => vm.run_opcode_bitwise_not(ctx),
+    ArrayPush => vm.run_opcode_array_push(ctx),
+    ArrayHole => vm.run_opcode_array_hole(ctx),
+    ArraySpread => vm.run_opcode_array_spread(ctx),
+    CallSpread => vm.run_opcode_call_spread(ctx, false),
+    TailCallSpread => vm.run_opcode_call_spread(ctx, true),
+    NewCallSpread => vm.run_opcode_new_call_spread(ctx),
+    ObjectSpread => vm.run_opcode_object_spread(ctx),
+    ObjectSpreadExcluding => vm.run_opcode_object_spread_excluding(ctx),
+    ValidateClassHeritage => vm.run_opcode_validate_class_heritage(ctx),
+    GetUpvalue => vm.run_opcode_get_upvalue(ctx),
+    SetUpvalue => vm.run_opcode_set_upvalue(ctx),
+    MakeClosure => vm.run_opcode_make_closure(ctx),
+    Negate => vm.run_opcode_negate(ctx),
+    Not => vm.run_opcode_not(ctx),
+    TypeOf => vm.run_opcode_type_of(ctx),
+    TypeOfGlobal => vm.run_opcode_type_of_global(ctx),
+    DeleteGlobal => vm.run_opcode_delete_global(ctx),
+    NewArray => vm.run_opcode_new_array(ctx),
+    NewObject => vm.run_opcode_new_object(ctx),
+    GetProperty => vm.run_opcode_get_property(ctx),
+    SetProperty => vm.run_opcode_set_property(ctx),
+    InitProperty => vm.run_opcode_init_property(ctx),
+    SetSuperProperty => vm.run_opcode_set_super_property(ctx),
+    SetSuperPropertyComputed => vm.run_opcode_set_super_property_computed(ctx),
+    GetSuperProperty => vm.run_opcode_get_super_property(ctx),
+    GetSuperPropertyComputed => vm.run_opcode_get_super_property_computed(ctx),
+    DefineComputedMethod => vm.run_opcode_define_computed_method(ctx),
+    GetIndex => vm.run_opcode_get_index(ctx),
+    SetIndex => vm.run_opcode_set_index(ctx),
+    InitIndex => vm.run_opcode_init_index(ctx),
+    SetComputedGetter => vm.run_opcode_set_computed_getter(ctx, false),
+    SetComputedSetter => vm.run_opcode_set_computed_setter(ctx, false),
+    SetComputedClassGetter => vm.run_opcode_set_computed_getter(ctx, true),
+    SetComputedClassSetter => vm.run_opcode_set_computed_setter(ctx, true),
+    MarkPropertyNonEnumerable => vm.run_opcode_mark_property_nonenumerable(ctx),
+    MarkPropertyReadonly => vm.run_opcode_mark_property_readonly(ctx),
+    AssertGlobalDefined => vm.run_opcode_assert_global_defined(ctx),
+    ToPropertyKey => vm.run_opcode_to_property_key(ctx),
+    Increment => vm.run_opcode_increment(ctx),
+    Decrement => vm.run_opcode_decrement(ctx),
+    Throw => vm.run_opcode_throw(ctx),
+    ThrowTypeError => vm.run_opcode_throw_type_error(ctx),
+    SetupTry => vm.run_opcode_setup_try(ctx),
+    TeardownTry => vm.run_opcode_teardown_try(ctx),
+    GetThis => vm.run_opcode_get_this(ctx),
+    GetThisSuper => vm.run_opcode_get_this_super(ctx),
+    ClearThisTdz => vm.run_opcode_clear_this_tdz(ctx),
+    ValidateProtoValue => vm.run_opcode_validate_proto_value(ctx),
+    GetKeys => vm.run_opcode_get_keys(ctx),
+    GetMethod => vm.run_opcode_get_method(ctx),
+    NewError => vm.run_opcode_new_error(ctx),
+    Dup => vm.run_opcode_dup(ctx),
+    Swap => vm.run_opcode_swap(ctx),
+    ToNumber => vm.run_opcode_to_number(ctx),
+    ToNumeric => vm.run_opcode_to_numeric(ctx),
+    CollectRest => vm.run_opcode_collect_rest(ctx),
+    In => vm.run_opcode_in(ctx),
+    InstanceOf => vm.run_opcode_instanceof(ctx),
+    DeleteProperty => vm.run_opcode_delete_property(ctx),
+    NewCall => vm.run_opcode_new_call(ctx),
+    DeleteIndex => vm.run_opcode_delete_index(ctx),
+    EnterFieldInit => vm.run_opcode_enter_field_init(ctx),
+    LeaveFieldInit => vm.run_opcode_leave_field_init(ctx),
+    AllocBrand => vm.run_opcode_alloc_brand(ctx),
+    ResetPrototype => vm.run_opcode_reset_prototype(ctx),
+    IteratorClose => vm.run_opcode_iterator_close(ctx),
+    IteratorCloseAbrupt => vm.run_opcode_iterator_close_abrupt(ctx),
+    AssertIterResult => vm.run_opcode_assert_iter_result(ctx),
+    BoxLocal => vm.run_opcode_box_local(ctx),
+    ReboxLocal => vm.run_opcode_rebox_local(ctx),
+    ClearLocalCells => vm.run_opcode_clear_local_cells(),
+    InitNamedFnSelf => vm.run_opcode_init_named_fn_self(ctx),
+    FreezeTemplate => vm.run_opcode_freeze_template(ctx),
+}
+
 fn native_jit_exception_value<'gc>(exception: crate::host_api::JitValue) -> Result<Value<'gc>, JSError> {
     if exception.flags != 0 {
         return Err(crate::raise_eval_error!("JIT exception has unsupported flags"));
@@ -129,6 +335,39 @@ fn native_jit_value_to_vm<'gc>(
 }
 
 impl<'gc> VM<'gc> {
+    #[cfg(feature = "jit")]
+    fn execute_baseline_block(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        min_depth: usize,
+        budget: Option<usize>,
+    ) -> Result<(usize, Option<RunInnerStatus<'gc>>), JSError> {
+        if self.baseline_jit.is_none() {
+            self.baseline_jit = Some(
+                crate::runtime::jit::baseline::BaselineJit::new()
+                    .map_err(|error| crate::raise_eval_error!(format!("JIT-required mode: {error}")))?,
+            );
+        }
+        let function = self
+            .baseline_jit
+            .as_mut()
+            .expect("baseline engine initialized")
+            .block(&self.chunk, self.ip)
+            .map_err(|error| crate::raise_eval_error!(format!("JIT-required mode: {error}")))?;
+        let mut state = BaselineState {
+            vm: self,
+            ctx,
+            min_depth,
+            budget,
+            executed: 0,
+            outcome: None,
+        };
+        // All JS references remain in traced VM storage. GC runs only after
+        // the native call returns to the arena's slice boundary.
+        unsafe { function((&mut state as *mut BaselineState<'_, '_>).cast()) };
+        Ok((state.executed, state.outcome.transpose()?))
+    }
+
     fn jit_host_function_property_matches(&self, object: &str, property: &str, function_name: &str) -> bool {
         fn host_function_matches(value: &Value<'_>, expected_name: &str) -> bool {
             match value {
@@ -285,6 +524,10 @@ impl<'gc> VM<'gc> {
                 return Err(crate::raise_eval_error!(format!("JIT returned invalid status {status}")));
             }
         };
+        #[cfg(feature = "jit")]
+        {
+            self.jit_stats.optimized_calls += 1;
+        }
         if matches!(
             status,
             crate::host_api::NativeJitStatus::Returned | crate::host_api::NativeJitStatus::Threw
@@ -387,6 +630,20 @@ impl<'gc> VM<'gc> {
             }
             if opcode_budget.is_some_and(|budget| executed_opcodes >= budget) {
                 return Ok(RunInnerStatus::Yielded);
+            }
+            #[cfg(feature = "jit")]
+            if self.jit_required {
+                let remaining = opcode_budget.map(|budget| budget - executed_opcodes);
+                let (executed, outcome) = self.execute_baseline_block(ctx, min_depth, remaining)?;
+                executed_opcodes += executed;
+                if let Some(outcome) = outcome {
+                    return Ok(outcome);
+                }
+                continue;
+            }
+            #[cfg(feature = "jit")]
+            {
+                self.jit_stats.interpreter_opcodes += 1;
             }
             // Fetch instruction
             self.current_opcode_ip = self.ip;
@@ -947,56 +1204,6 @@ impl<'gc> VM<'gc> {
                     self.handle_throw(ctx, &err)?;
                     return Ok(OpcodeAction::Continue);
                 }
-                if self.jit_required {
-                    if is_method || is_tail_call {
-                        return Err(crate::raise_eval_error!(format!(
-                            "JIT-required mode cannot execute method or tail call at bytecode offset {target_ip}"
-                        )));
-                    }
-                    let Some((arity, upvalue_count, generic_value, function, dependencies_match)) =
-                        self.jit_functions.get(&target_ip).map(|entry| {
-                            (
-                                entry.arity,
-                                entry.upvalue_count,
-                                entry.generic_value,
-                                entry.function,
-                                self.jit_dependencies_match(&entry.dependencies),
-                            )
-                        })
-                    else {
-                        return Err(crate::raise_eval_error!(format!(
-                            "JIT-required mode: function at bytecode offset {target_ip} was not compiled"
-                        )));
-                    };
-                    let argument_values = &self.stack[callee_idx + 1..callee_idx + 1 + arg_count];
-                    if arity != arg_count || upvalue_count != 0 {
-                        return Err(crate::raise_eval_error!(format!(
-                            "JIT-required mode: function at bytecode offset {target_ip} has an unsupported arity or captured upvalues"
-                        )));
-                    }
-                    if !generic_value && argument_values.iter().any(|value| !matches!(value, Value::Number(_))) {
-                        return Err(crate::raise_eval_error!(format!(
-                            "JIT-required mode: function at bytecode offset {target_ip} has unsupported arguments (numeric arguments required)"
-                        )));
-                    }
-                    if !dependencies_match {
-                        return Err(crate::raise_eval_error!(format!(
-                            "JIT-required mode: function at bytecode offset {target_ip} has changed dependencies"
-                        )));
-                    }
-                    self.execute_native_jit_call(
-                        ctx,
-                        callee_idx,
-                        arg_count,
-                        function,
-                        NativeJitCallOptions {
-                            generic_value,
-                            upvalues: &[],
-                        },
-                        true,
-                    )?;
-                    return Ok(OpcodeAction::Continue);
-                }
                 if let Some(&realm_id) = self.fn_realm.get(&target_ip)
                     && realm_id < self.child_realms.len()
                     && let Some(mut child) = self.child_realms[realm_id].take()
@@ -1145,7 +1352,7 @@ impl<'gc> VM<'gc> {
                                 unreachable!("JIT entry was found during dependency validation");
                             };
                             entry.calls = entry.calls.saturating_add(1);
-                            (entry.calls >= 2, entry.calls, entry.function)
+                            (self.jit_required || entry.calls >= 2, entry.calls, entry.function)
                         };
                         if should_execute {
                             if call_count == 2 {
@@ -1185,56 +1392,6 @@ impl<'gc> VM<'gc> {
                 self.ip = target_ip;
             }
             Value::Closure(target_ip, arity, ref upvals) => {
-                if self.jit_required {
-                    if is_method || is_tail_call {
-                        return Err(crate::raise_eval_error!(format!(
-                            "JIT-required mode cannot execute method or tail closure at bytecode offset {target_ip}"
-                        )));
-                    }
-                    let Some((registered_arity, upvalue_count, generic_value, function, dependencies_match)) =
-                        self.jit_functions.get(&target_ip).map(|entry| {
-                            (
-                                entry.arity,
-                                entry.upvalue_count,
-                                entry.generic_value,
-                                entry.function,
-                                self.jit_dependencies_match(&entry.dependencies),
-                            )
-                        })
-                    else {
-                        return Err(crate::raise_eval_error!(format!(
-                            "JIT-required mode: closure at bytecode offset {target_ip} was not compiled"
-                        )));
-                    };
-                    let Some(captured_cells) = upvals.get(..upvalue_count) else {
-                        return Err(crate::raise_eval_error!(format!(
-                            "JIT-required mode: closure at bytecode offset {target_ip} has missing upvalues"
-                        )));
-                    };
-                    let captured_values = captured_cells.iter().map(|cell| cell.borrow().clone()).collect::<Vec<_>>();
-                    let argument_values = &self.stack[callee_idx + 1..callee_idx + 1 + arg_count];
-                    if registered_arity != arg_count
-                        || (!generic_value && argument_values.iter().any(|value| !matches!(value, Value::Number(_))))
-                        || captured_values.iter().any(|value| !matches!(value, Value::Number(_)))
-                        || !dependencies_match
-                    {
-                        return Err(crate::raise_eval_error!(format!(
-                            "JIT-required mode: closure at bytecode offset {target_ip} has unsupported arguments or changed dependencies"
-                        )));
-                    }
-                    self.execute_native_jit_call(
-                        ctx,
-                        callee_idx,
-                        arg_count,
-                        function,
-                        NativeJitCallOptions {
-                            generic_value,
-                            upvalues: captured_cells,
-                        },
-                        true,
-                    )?;
-                    return Ok(OpcodeAction::Continue);
-                }
                 if !is_method
                     && !is_tail_call
                     && arg_count == arity as usize
@@ -1259,7 +1416,7 @@ impl<'gc> VM<'gc> {
                                     .get_mut(&target_ip)
                                     .expect("JIT entry remained registered during validation");
                                 entry.calls = entry.calls.saturating_add(1);
-                                (entry.calls >= 2, entry.calls)
+                                (self.jit_required || entry.calls >= 2, entry.calls)
                             };
                             if should_execute {
                                 if call_count == 2 {
@@ -1494,16 +1651,6 @@ impl<'gc> VM<'gc> {
                 let function_id = get_function_id(*map);
                 // Check if it's a Function wrapper (Object with __fn_body__ or __native_id__)
                 let borrow = map.borrow();
-                if self.jit_required
-                    && (borrow.contains_key("__proxy_target__")
-                        || borrow.contains_key("__bound_target__")
-                        || borrow.contains_key("__fn_body__"))
-                {
-                    drop(borrow);
-                    return Err(crate::raise_eval_error!(
-                        "JIT-required mode cannot execute wrapped JavaScript function"
-                    ));
-                }
                 if let Some(Value::String(host_name_u16)) = borrow.get("__host_fn__") {
                     let host_name = crate::unicode::utf16_to_utf8(host_name_u16);
                     let bound_this = borrow.get("__host_this__").cloned();
@@ -3570,11 +3717,6 @@ impl<'gc> VM<'gc> {
         let callee = self.stack[callee_idx].clone();
         match callee {
             Value::Function(target_ip, arity) => {
-                if self.jit_required {
-                    return Err(crate::raise_eval_error!(format!(
-                        "JIT-required mode cannot execute spread call at bytecode offset {target_ip}"
-                    )));
-                }
                 let derived_tdz = if is_method && self.chunk.derived_constructor_ips.contains(&target_ip) {
                     Some(true)
                 } else {
@@ -3606,11 +3748,6 @@ impl<'gc> VM<'gc> {
                 self.ip = target_ip;
             }
             Value::Closure(target_ip, arity, ref upvals) => {
-                if self.jit_required {
-                    return Err(crate::raise_eval_error!(format!(
-                        "JIT-required mode cannot execute spread call to closure at bytecode offset {target_ip}"
-                    )));
-                }
                 let closure_upvalues = (**upvals).clone();
                 let derived_tdz = if is_method && self.chunk.derived_constructor_ips.contains(&target_ip) {
                     Some(true)
@@ -3785,9 +3922,6 @@ impl<'gc> VM<'gc> {
             err_map.insert("message".to_string(), Value::from("is not a constructor"));
             self.handle_throw(ctx, &Value::Object(new_gc_cell_ptr(ctx, err_map)))?;
             return Ok(OpcodeAction::Continue);
-        }
-        if self.jit_required && matches!(&constructor, Value::Function(..) | Value::Closure(..)) {
-            return Err(crate::raise_eval_error!("JIT-required mode cannot execute spread constructor"));
         }
         match self.construct_value(ctx, &constructor, &spread_args, Some(&constructor)) {
             Ok(result) => self.stack.push(result),
@@ -8068,11 +8202,6 @@ impl<'gc> VM<'gc> {
         }
         match callee {
             Value::Function(target_ip, _arity) | Value::Closure(target_ip, _arity, _) => {
-                if self.jit_required {
-                    return Err(crate::raise_eval_error!(format!(
-                        "JIT-required mode cannot execute constructor at bytecode offset {target_ip}"
-                    )));
-                }
                 if self.fn_realm.contains_key(&target_ip) {
                     let args: Vec<Value<'gc>> = (0..arg_count)
                         .map(|_| self.stack.pop().expect("VM Stack underflow"))

@@ -13,6 +13,7 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module, default_libcall_names};
 use std::collections::{HashMap, HashSet, VecDeque};
 
+pub(crate) mod baseline;
 mod bytecode;
 
 pub(crate) struct JitEngine {
@@ -295,28 +296,32 @@ unsafe extern "C" fn js_math_builtin(arguments: *const f64, length: usize, id: u
     }
 }
 
+fn native_builder() -> Result<JITBuilder, String> {
+    if !cfg!(all(
+        target_pointer_width = "64",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )) {
+        return Err("JIT is currently supported only on 64-bit x86 and ARM hosts".to_string());
+    }
+
+    let mut flag_builder = settings::builder();
+    flag_builder
+        .set("use_colocated_libcalls", "false")
+        .map_err(|error| error.to_string())?;
+    flag_builder
+        .set("is_pic", if cfg!(target_arch = "x86_64") { "true" } else { "false" })
+        .map_err(|error| error.to_string())?;
+
+    let isa_builder = cranelift_native::builder().map_err(|error| error.to_string())?;
+    let isa = isa_builder
+        .finish(settings::Flags::new(flag_builder))
+        .map_err(|error| error.to_string())?;
+    Ok(JITBuilder::with_isa(isa, default_libcall_names()))
+}
+
 impl JitEngine {
     pub(crate) fn new() -> Result<Self, String> {
-        if !cfg!(all(
-            target_pointer_width = "64",
-            any(target_arch = "x86_64", target_arch = "aarch64")
-        )) {
-            return Err("JIT is currently supported only on 64-bit x86 and ARM hosts".to_string());
-        }
-
-        let mut flag_builder = settings::builder();
-        flag_builder
-            .set("use_colocated_libcalls", "false")
-            .map_err(|error| error.to_string())?;
-        flag_builder
-            .set("is_pic", if cfg!(target_arch = "x86_64") { "true" } else { "false" })
-            .map_err(|error| error.to_string())?;
-
-        let isa_builder = cranelift_native::builder().map_err(|error| error.to_string())?;
-        let isa = isa_builder
-            .finish(settings::Flags::new(flag_builder))
-            .map_err(|error| error.to_string())?;
-        let mut builder = JITBuilder::with_isa(isa, default_libcall_names());
+        let mut builder = native_builder()?;
         builder.symbol("javascript_jit_fmod", js_fmod as *const u8);
         builder.symbol("javascript_jit_pow", js_pow as *const u8);
         builder.symbol("javascript_jit_bitwise", js_bitwise_binary as *const u8);

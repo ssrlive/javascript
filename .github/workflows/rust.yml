@@ -62,8 +62,10 @@ jobs:
             printf '\n🔧 Running %s\n' "$f"
             if [[ "$f" == *.mjs ]] || [[ "$f" == *es6_module*.js ]]; then
               cargo run --all-features --example js-rs -- --module "$f"
+              cargo run --all-features --example js-rs -- --jit-required --module "$f"
             else
               cargo run --all-features --example js-rs -- "$f"
+              cargo run --all-features --example js-rs -- --jit-required "$f"
             fi
           done
 

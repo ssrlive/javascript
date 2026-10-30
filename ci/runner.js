@@ -5,7 +5,7 @@ const { spawnSync, spawn } = require('child_process');
 const { composeTest, extractMeta, parseList, hasFlag, referencesAssert } = require('./compose_test');
 
 const TEST262_ROOT_DIR = path.resolve(__dirname, '..', '..', 'test262');
-const RESULTS_FILE = 'test262-results.log';
+const RESULTS_FILE = process.env.TEST262_RESULTS_FILE || 'test262-results.log';
 
 // Defaults
 let LIMIT = 100;
@@ -44,7 +44,7 @@ for (let i = 0; i < argv.length; i++) {
     KEEP_TMP = true;
   } else if (a === '--help') {
     console.log('Usage: node ci/runner.js [--keep-tmp] [--jit-required] [--jobs N] [--limit N] [--focus name[,name2]] (multiple --focus allowed)');
-    console.log('  --jit-required fails tests when ordinary JavaScript functions fall back from native JIT code');
+    console.log('  --jit-required requires compiled script/function execution; VM semantic helpers are allowed, interpreter fallback is not');
     console.log('  Append (filesonly) to a focus token to collect only top-level files, e.g. "a/(filesonly)",b/c');
     console.log(`  If --focus is omitted, defaults to: ${DEFAULT_FOCUS_DIRS.join(', ')}`);
     process.exit(0);
@@ -85,6 +85,7 @@ function cleanupComposedArtifacts(tmpPath) {
 console.log(`Running Test262 tests (node runner)`);
 console.log(`Composed temporary files are deleted by default (KEEP_TMP=${KEEP_TMP}). Use --keep-tmp to explicitly ensure, or set TEST262_KEEP_TMP=1 to enable.`);
 console.log(`Execution jobs: ${JOBS}`);
+console.log(`Required JIT mode: ${JIT_REQUIRED}`);
 
 function runCommandAsync(cmd, args, options = {}) {
   return new Promise((resolve) => {
@@ -407,7 +408,9 @@ async function runAll() {
       let isPass = false;
       let failReason = '';
 
-      if (expectedNegative) {
+      if (JIT_REQUIRED && outStr.includes('JIT-required mode:')) {
+        failReason = 'Required JIT compilation/execution failed (not an expected JavaScript error).';
+      } else if (expectedNegative) {
         if (res && res.status === 0) {
           failReason = 'Expected test to fail, but it succeeded.';
         } else if (!outStr.includes(expectedNegative.type)) {
@@ -647,6 +650,10 @@ async function runAll() {
   console.log(`\nRan ${n} candidates: pass=${pass} fail=${fail} skip=${skip}`);
   console.log(`Executed ${pass + fail} tests (pass+fail).`);
   console.log(`Details in ${RESULTS_FILE}`);
+  if (JIT_REQUIRED && pass + fail === 0) {
+    console.error('ERROR: Required JIT conformance executed no tests; check focus paths and feature skips.');
+    process.exit(1);
+  }
   if (fail > 0) {
     console.log('One or more tests failed; exiting with status 1');
     process.exit(1);

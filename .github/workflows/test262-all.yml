@@ -17,11 +17,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - cluster: 1
-          - cluster: 2
-          - cluster: 3
-          - cluster: 4
+        cluster: [1, 2, 3, 4]
+        execution: [interpreter, jit-required]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -36,11 +33,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y git
 
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
       - name: Build JavaScript engine
         run: |
           cargo build --all-features --release --example js-rs
 
-      - name: Run test262 subset ${{ matrix.cluster }}
+      - name: Run test262 subset ${{ matrix.cluster }} (${{ matrix.execution }})
         if: ${{ !cancelled() }}
         env:
           FAIL_ON_FAILURE: "true"
@@ -83,6 +84,9 @@ jobs:
 
           echo "Running subset ${{ matrix.cluster }}: $TITLE"
           RUN_ARGS=(--limit 100000 --focus "$FOCUS")
+          if [ "${{ matrix.execution }}" = "jit-required" ]; then
+            RUN_ARGS+=(--jit-required)
+          fi
           if [ -n "$TIMEOUT" ]; then
             RUN_ARGS+=(--timeout "$TIMEOUT")
           fi
@@ -96,7 +100,7 @@ jobs:
         if: ${{ always() && !cancelled() }}
         uses: actions/upload-artifact@v6
         with:
-          name: test262-results-${{ matrix.cluster }}
+          name: test262-results-${{ matrix.cluster }}-${{ matrix.execution }}
           path: test262-results.log
 
   summarize-test262-results:

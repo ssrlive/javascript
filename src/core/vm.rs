@@ -21,7 +21,7 @@ mod dataview;
 mod date;
 mod intl;
 mod regexp;
-mod runner;
+pub(crate) mod runner;
 mod temporal;
 mod typedarray;
 mod uri;
@@ -906,6 +906,10 @@ pub struct VM<'gc> {
     host_modules: crate::host_api::HostModuleRegistry,
     jit_functions: HashMap<usize, JitFunctionEntry>,
     jit_required: bool,
+    #[cfg(feature = "jit")]
+    baseline_jit: Option<crate::runtime::jit::baseline::BaselineJit>,
+    #[cfg(feature = "jit")]
+    jit_stats: crate::runtime::JitStats,
     jit_roots: Vec<Value<'gc>>,
     stop_requested: bool,
     // Property storage for Function values, keyed by function IP
@@ -1328,6 +1332,10 @@ impl<'gc> VM<'gc> {
             host_modules: crate::host_api::HostModuleRegistry::default(),
             jit_functions: HashMap::new(),
             jit_required: false,
+            #[cfg(feature = "jit")]
+            baseline_jit: None,
+            #[cfg(feature = "jit")]
+            jit_stats: crate::runtime::JitStats::default(),
             jit_roots: Vec::new(),
             stop_requested: false,
             fn_props: HashMap::new(),
@@ -3949,6 +3957,18 @@ impl<'gc> VM<'gc> {
         self.jit_required = required;
     }
 
+    #[cfg(feature = "jit")]
+    pub(crate) fn jit_stats(&self) -> crate::runtime::JitStats {
+        let mut stats = self.jit_stats;
+        for child in self.child_realms.iter().flatten() {
+            let child_stats = child.jit_stats();
+            stats.baseline_opcodes += child_stats.baseline_opcodes;
+            stats.interpreter_opcodes += child_stats.interpreter_opcodes;
+            stats.optimized_calls += child_stats.optimized_calls;
+        }
+        stats
+    }
+
     pub(crate) fn new_compiler(&self) -> crate::core::Compiler<'gc> {
         let mut compiler = crate::core::Compiler::new();
         compiler.set_host_modules(self.host_modules.clone());
@@ -6080,7 +6100,7 @@ impl<'gc> VM<'gc> {
                 } else {
                     String::new()
                 };
-                crate::js_agent::start_agent(src);
+                crate::js_agent::start_agent(src, self.jit_required);
                 Value::Undefined
             }
             "__agent_broadcast" => {
@@ -6168,6 +6188,7 @@ impl<'gc> VM<'gc> {
             "__createRealm__" => {
                 let realm_id = self.child_realms.len();
                 let mut child = Box::new(VM::new(Chunk::default(), ctx));
+                child.jit_required = self.jit_required;
                 let child_global_this = child.global_this;
 
                 if let Some(Value::Object(parent_symbol_obj)) = self.globals.get("Symbol")
@@ -20581,11 +20602,6 @@ impl<'gc> VM<'gc> {
     ) -> Result<Value<'gc>, JSError> {
         match func {
             Value::Function(ip, arity) => {
-                if self.jit_required {
-                    return Err(crate::raise_eval_error!(format!(
-                        "JIT-required mode cannot execute function at bytecode offset {ip} through a runtime callback"
-                    )));
-                }
                 if let Some(&realm_id) = self.fn_realm.get(ip)
                     && realm_id < self.child_realms.len()
                     && let Some(mut child) = self.child_realms[realm_id].take()
@@ -20663,9 +20679,6 @@ impl<'gc> VM<'gc> {
                 self.this_stack.pop();
                 out
             }
-            Value::Closure(ip, _, _) if self.jit_required => Err(crate::raise_eval_error!(format!(
-                "JIT-required mode cannot execute closure at bytecode offset {ip} through a runtime callback"
-            ))),
             Value::Closure(ip, arity, upv) => {
                 if let Some(&realm_id) = self.fn_realm.get(ip)
                     && realm_id < self.child_realms.len()
@@ -20760,15 +20773,6 @@ impl<'gc> VM<'gc> {
             Value::Object(map) => {
                 let function_id = get_function_id(*map);
                 let borrow = map.borrow();
-                if self.jit_required
-                    && (borrow.contains_key("__proxy_target__")
-                        || borrow.contains_key("__bound_target__")
-                        || borrow.contains_key("__fn_body__"))
-                {
-                    return Err(crate::raise_eval_error!(
-                        "JIT-required mode cannot execute wrapped JavaScript function"
-                    ));
-                }
                 if let Some(Value::String(host_name_u16)) = borrow.get("__host_fn__") {
                     let host_this = borrow.get("__host_this__").cloned();
                     let host_name = crate::unicode::utf16_to_utf8(host_name_u16);
@@ -22859,6 +22863,7 @@ impl<'gc> VM<'gc> {
         // Create a fresh child realm (like __createRealm__)
         let realm_id = self.child_realms.len();
         let mut child = Box::new(VM::new(Chunk::default(), ctx));
+        child.jit_required = self.jit_required;
 
         // Sync Symbol registry so well-known symbols have the same identity
         if let Some(Value::Object(parent_symbol_obj)) = self.globals.get("Symbol")
@@ -26791,6 +26796,7 @@ impl<'gc> VM<'gc> {
                         }
                     }
                     let mut eval_vm: VM<'gc> = VM::new(self.chunk.clone(), ctx);
+                    eval_vm.jit_required = self.jit_required;
                     // Indirect eval must still use the caller realm's actual global this
                     // value for sloppy this-binding, not the fresh VM::new() global object.
                     eval_vm.global_this = self.global_this;
@@ -27041,6 +27047,13 @@ impl<'gc> VM<'gc> {
                     }
 
                     let eval_result = eval_vm.run(ctx);
+                    #[cfg(feature = "jit")]
+                    {
+                        let stats = eval_vm.jit_stats();
+                        self.jit_stats.baseline_opcodes += stats.baseline_opcodes;
+                        self.jit_stats.interpreter_opcodes += stats.interpreter_opcodes;
+                        self.jit_stats.optimized_calls += stats.optimized_calls;
+                    }
                     // Sync brand counter so subsequent evals get unique brands
                     if eval_vm.runtime_brand_counter > self.runtime_brand_counter {
                         self.runtime_brand_counter = eval_vm.runtime_brand_counter;
@@ -43935,6 +43948,7 @@ impl<'gc> VM<'gc> {
     }
 
     fn sync_runtime_to_child(&self, child: &mut VM<'gc>) {
+        child.jit_required = self.jit_required;
         child.runtime_brand_counter = self.runtime_brand_counter;
         child.symbol_counter = self.symbol_counter;
         child.symbol_registry = self.symbol_registry.clone();

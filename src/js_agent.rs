@@ -40,6 +40,8 @@ struct AgentContext {
     broadcast_cv: (Mutex<u32>, Condvar),
     agent_count: AtomicU32,
     start_time: Instant,
+    #[cfg(feature = "jit")]
+    jit_stats: Mutex<crate::runtime::JitStats>,
 }
 
 impl AgentContext {
@@ -52,6 +54,8 @@ impl AgentContext {
             broadcast_cv: (Mutex::new(0), Condvar::new()),
             agent_count: AtomicU32::new(0),
             start_time: Instant::now(),
+            #[cfg(feature = "jit")]
+            jit_stats: Mutex::new(crate::runtime::JitStats::default()),
         }
     }
 }
@@ -281,7 +285,12 @@ pub fn wait_for_broadcast() -> Option<BroadcastInfo> {
     context.broadcast_data.lock().unwrap().clone()
 }
 
-pub fn start_agent(script: String) {
+#[cfg(feature = "jit")]
+pub(crate) fn jit_stats(context_id: u64) -> crate::runtime::JitStats {
+    *context_for(context_id).jit_stats.lock().unwrap()
+}
+
+pub fn start_agent(script: String, jit_required: bool) {
     let context_id = current_context_id();
     let context = context_for(context_id);
     context.agent_count.fetch_add(1, Ordering::SeqCst);
@@ -290,7 +299,24 @@ pub fn start_agent(script: String) {
             IS_AGENT_THREAD.with(|c| c.set(true));
             LAST_BROADCAST_SEEN.with(|c| c.set(0));
             use crate::core::DEFAULT_GC_OPCODE_BUDGET as B;
-            let result = crate::runtime::evaluate_script_with_unwrap(script, false, Option::<&std::path::Path>::None, false, B);
+            let result = crate::runtime::JsRuntime::with_gc_opcode_budget(B).and_then(|mut runtime| {
+                #[cfg(feature = "jit")]
+                runtime.set_jit_required(jit_required);
+                #[cfg(not(feature = "jit"))]
+                let _ = jit_required;
+                let result = runtime.eval_script_with_unwrap(script, false, Option::<&std::path::Path>::None, false);
+                #[cfg(feature = "jit")]
+                {
+                    // This context also owns nested agents; count only this VM here.
+                    let stats = runtime.mutate_root(|_, vm| vm.jit_stats());
+                    let context = current_context();
+                    let mut total = context.jit_stats.lock().unwrap();
+                    total.baseline_opcodes += stats.baseline_opcodes;
+                    total.interpreter_opcodes += stats.interpreter_opcodes;
+                    total.optimized_calls += stats.optimized_calls;
+                }
+                result
+            });
             if let Err(err) = result {
                 push_report(format!("__agent_error__:{err}"));
             }
@@ -314,6 +340,10 @@ pub fn reset_agent_state() {
     context.shared_buffers.lock().unwrap().clear();
     *context.broadcast_data.lock().unwrap() = None;
     context.agent_count.store(0, Ordering::SeqCst);
+    #[cfg(feature = "jit")]
+    {
+        *context.jit_stats.lock().unwrap() = crate::runtime::JitStats::default();
+    }
     let (lock, cv) = &context.broadcast_cv;
     *lock.lock().unwrap() = 0;
     cv.notify_all();
@@ -330,6 +360,73 @@ pub(crate) fn release_context(id: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "jit")]
+    #[test]
+    fn agents_inherit_required_jit_without_interpreter_fallback() {
+        for required in [false, true] {
+            let context_id = new_context_id();
+            with_context(context_id, || {
+                start_agent(
+                    r#"
+                    function* values() { yield { value: 42 }; }
+                    __agent_report(String(values().next().value.value));
+                    "#
+                    .to_string(),
+                    required,
+                );
+                let context = current_context();
+                let handles = std::mem::take(&mut *context.handles.lock().unwrap());
+                for handle in handles {
+                    handle.join().unwrap();
+                }
+                assert_eq!(pop_report().as_deref(), Some("42"));
+                assert_eq!(pop_report(), None);
+                let stats = jit_stats(context_id);
+                if required {
+                    assert!(stats.baseline_opcodes > 0, "{stats:?}");
+                    assert_eq!(stats.interpreter_opcodes, 0, "{stats:?}");
+                } else {
+                    assert!(stats.interpreter_opcodes > 0, "{stats:?}");
+                }
+                reset_agent_state();
+                assert_eq!(jit_stats(context_id), crate::runtime::JitStats::default());
+            });
+            release_context(context_id);
+        }
+    }
+
+    #[cfg(feature = "jit")]
+    #[test]
+    fn nested_agent_counters_are_recorded_once() {
+        let context_id = new_context_id();
+        with_context(context_id, || {
+            start_agent(
+                r#"
+                __agent_start("function twice(value) { return value * 2; } twice(21);");
+                function twice(value) { return value * 2; }
+                twice(21);
+                "#
+                .to_string(),
+                true,
+            );
+            let context = current_context();
+            loop {
+                let handles = std::mem::take(&mut *context.handles.lock().unwrap());
+                if handles.is_empty() {
+                    break;
+                }
+                for handle in handles {
+                    handle.join().unwrap();
+                }
+            }
+            assert_eq!(pop_report(), None);
+            let stats = jit_stats(context_id);
+            assert_eq!(stats.interpreter_opcodes, 0, "{stats:?}");
+            assert_eq!(stats.optimized_calls, 2, "{stats:?}");
+        });
+        release_context(context_id);
+    }
 
     #[test]
     fn agent_state_is_scoped_to_runtime_context() {

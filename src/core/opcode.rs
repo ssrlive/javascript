@@ -28,7 +28,7 @@ pub enum Opcode {
     LessEqual = 22,
     GreaterEqual = 23,
     NotEqual = 24,
-    StrictNotEqual = 25,
+    StrictEqual = 25,
     JumpIfTrue = 26,
     NewArray = 27,
     NewObject = 28,
@@ -198,7 +198,7 @@ impl Opcode {
             | Op::LessEqual
             | Op::GreaterEqual
             | Op::NotEqual
-            | Op::StrictNotEqual
+            | Op::StrictEqual
             | Op::GetIndex
             | Op::SetIndex
             | Op::Increment
@@ -323,7 +323,7 @@ impl TryFrom<u8> for Opcode {
             22 => Opcode::LessEqual,
             23 => Opcode::GreaterEqual,
             24 => Opcode::NotEqual,
-            25 => Opcode::StrictNotEqual,
+            25 => Opcode::StrictEqual,
             26 => Opcode::JumpIfTrue,
             27 => Opcode::NewArray,
             28 => Opcode::NewObject,

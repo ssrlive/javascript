@@ -25,7 +25,7 @@ const DIRECT_NATIVE_OPCODES: &[&str] = &[
     "GreaterEqual",
     "Equal",
     "NotEqual",
-    "StrictNotEqual",
+    "StrictEqual",
     "Jump",
     "JumpIfFalse",
     "JumpIfTrue",
@@ -238,7 +238,7 @@ fn opcode_family(name: &str) -> &'static str {
         "Constant" | "Pop" | "GetLocal" | "SetLocal" | "Negate" | "Not" | "TypeOf" | "Dup" | "Swap" | "GetThis" | "ToNumber"
         | "GetArguments" | "GetNewTarget" | "ToPropertyKey" | "ToNumeric" => "values-and-locals",
         "Add" | "Sub" | "Mul" | "Div" | "Mod" | "LessThan" | "GreaterThan" | "Equal" | "LessEqual" | "GreaterEqual" | "NotEqual"
-        | "StrictNotEqual" | "Pow" | "BitwiseAnd" | "BitwiseOr" | "BitwiseXor" | "ShiftLeft" | "ShiftRight" | "UnsignedShiftRight"
+        | "StrictEqual" | "Pow" | "BitwiseAnd" | "BitwiseOr" | "BitwiseXor" | "ShiftLeft" | "ShiftRight" | "UnsignedShiftRight"
         | "BitwiseNot" | "Increment" | "Decrement" => "operators",
         "Return" | "Jump" | "JumpIfFalse" | "JumpIfTrue" => "control-flow",
         "Call" | "NewCall" | "CollectRest" | "CallSpread" | "NewCallSpread" | "GetUpvalue" | "SetUpvalue" | "MakeClosure" | "BoxLocal"

@@ -439,7 +439,7 @@ impl<'gc> VM<'gc> {
                 Opcode::GreaterThan => self.run_opcode_greater_than(ctx)?,
                 Opcode::Equal => self.run_opcode_equal(ctx)?,
                 Opcode::NotEqual => self.run_opcode_not_equal(ctx)?,
-                Opcode::StrictNotEqual => self.run_opcode_strict_not_equal(ctx)?,
+                Opcode::StrictEqual => self.run_opcode_strict_equal(ctx)?,
                 Opcode::LessEqual => self.run_opcode_less_equal(ctx)?,
                 Opcode::GreaterEqual => self.run_opcode_greater_equal(ctx)?,
                 Opcode::Mod => self.run_opcode_mod(ctx)?,
@@ -3048,56 +3048,11 @@ impl<'gc> VM<'gc> {
         Ok(OpcodeAction::Continue)
     }
 
-    // Opcode::StrictNotEqual
-    fn run_opcode_strict_not_equal(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
-        let _ = ctx;
+    // Opcode::StrictEqual
+    fn run_opcode_strict_equal(&mut self, _ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let b = self.stack.pop().expect("VM Stack underflow");
         let a = self.stack.pop().expect("VM Stack underflow");
-        match (&a, &b) {
-            (Value::Number(a_num), Value::Number(b_num)) => {
-                self.stack.push(Value::Boolean(a_num != b_num));
-            }
-            (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
-                self.stack.push(Value::Boolean(a_bi != b_bi));
-            }
-            (Value::Boolean(a_bool), Value::Boolean(b_bool)) => {
-                self.stack.push(Value::Boolean(a_bool != b_bool));
-            }
-            (Value::String(a_s), Value::String(b_s)) => {
-                self.stack.push(Value::Boolean(a_s != b_s));
-            }
-            (Value::Null, Value::Null) | (Value::Undefined, Value::Undefined) => {
-                self.stack.push(Value::Boolean(false));
-            }
-            (Value::Symbol(a_sym), Value::Symbol(b_sym)) => {
-                self.stack.push(Value::Boolean(!Gc::ptr_eq(*a_sym, *b_sym)));
-            }
-            (Value::Object(a_rc), Value::Object(b_rc)) => {
-                self.stack.push(Value::Boolean(!Gc::ptr_eq(*a_rc, *b_rc)));
-            }
-            (Value::Array(a_rc), Value::Array(b_rc)) => {
-                self.stack.push(Value::Boolean(!Gc::ptr_eq(*a_rc, *b_rc)));
-            }
-            (Value::Map(a_rc), Value::Map(b_rc)) => {
-                self.stack.push(Value::Boolean(!Gc::ptr_eq(*a_rc, *b_rc)));
-            }
-            (Value::Set(a_rc), Value::Set(b_rc)) => {
-                self.stack.push(Value::Boolean(!Gc::ptr_eq(*a_rc, *b_rc)));
-            }
-            (Value::Function(a_ip, _), Value::Function(b_ip, _)) => {
-                self.stack.push(Value::Boolean(a_ip != b_ip));
-            }
-            (Value::Closure(a_ip, _, a_uv), Value::Closure(b_ip, _, b_uv)) => {
-                self.stack.push(Value::Boolean(a_ip != b_ip || !Gc::ptr_eq(*a_uv, *b_uv)));
-            }
-            (Value::Function(_, _), Value::Closure(_, _, _)) | (Value::Closure(_, _, _), Value::Function(_, _)) => {
-                self.stack.push(Value::Boolean(true));
-            }
-            (Value::NativeFunction(a_id), Value::NativeFunction(b_id)) => {
-                self.stack.push(Value::Boolean(a_id != b_id));
-            }
-            _ => self.stack.push(Value::Boolean(true)),
-        }
+        self.stack.push(Value::Boolean(self.strict_equal(&a, &b)));
         Ok(OpcodeAction::Continue)
     }
 

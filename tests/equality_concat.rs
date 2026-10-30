@@ -95,3 +95,10 @@ fn strict_equality_different_types() {
     let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "false");
 }
+
+#[test]
+fn strict_inequality_uses_strict_equality_semantics() {
+    let script = "10 !== 10 || 10 !== '10'";
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
+    assert_eq!(result, "true");
+}

@@ -871,7 +871,7 @@ impl JitEngine {
                     | Opcode::GreaterEqual
                     | Opcode::Equal
                     | Opcode::NotEqual
-                    | Opcode::StrictNotEqual => {
+                    | Opcode::StrictEqual => {
                         if stack.pop() != Some(BytecodeStackKind::Number) || stack.pop() != Some(BytecodeStackKind::Number) {
                             return Ok(None);
                         }
@@ -1274,7 +1274,7 @@ impl JitEngine {
                         | Opcode::GreaterEqual
                         | Opcode::Equal
                         | Opcode::NotEqual
-                        | Opcode::StrictNotEqual => {
+                        | Opcode::StrictEqual => {
                             let right = stack.pop().expect("bytecode stack was validated");
                             let left = stack.pop().expect("bytecode stack was validated");
                             let condition = match instruction.opcode {
@@ -1283,7 +1283,8 @@ impl JitEngine {
                                 Opcode::LessEqual => FloatCC::LessThanOrEqual,
                                 Opcode::GreaterEqual => FloatCC::GreaterThanOrEqual,
                                 Opcode::Equal => FloatCC::Equal,
-                                Opcode::NotEqual | Opcode::StrictNotEqual => FloatCC::NotEqual,
+                                Opcode::NotEqual => FloatCC::NotEqual,
+                                Opcode::StrictEqual => FloatCC::Equal,
                                 _ => unreachable!("matched numeric comparison opcode"),
                             };
                             let condition = builder.ins().fcmp(condition, left, right);

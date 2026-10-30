@@ -17,6 +17,8 @@ pub use error::{JSError, JSErrorKind};
 // pub use js_promise::set_short_timer_threshold_ms;
 // pub use js_promise::set_wait_for_active_handles;
 pub use repl::Repl;
+#[cfg(feature = "jit")]
+pub use runtime::evaluate_script_with_jit_required;
 #[cfg(feature = "console")]
 pub use runtime::{ConsoleLevel, ConsoleMessage};
 pub use runtime::{HostHooks, JsObjectHandle, JsPromiseResolver, JsRunStatus, JsRuntime, JsValue, ModuleLoader, ModuleSource};

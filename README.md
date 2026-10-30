@@ -91,6 +91,9 @@ cargo run -r --example js-rs -- -e "1 + 2"
 # Tune GC safe-point frequency (positive opcode count; default: 4096)
 cargo run -r --example js-rs -- --gc-opcode-budget 1024 path/to/script.js
 
+# Fail if an ordinary JavaScript function call falls back from the JIT
+cargo run -r --example js-rs -- --jit-required path/to/script.js
+
 # Start REPL
 cargo run -r --example js-rs
 ```
@@ -105,6 +108,7 @@ Options:
       --timer-wait-ms <TIMER_WAIT_MS>
   -b, --gc-opcode-budget <GC_OPCODE_BUDGET>
       --module
+      --jit-required
   -h, --help
   -V, --version
 ```
@@ -128,6 +132,16 @@ JavaScript function calls to use compiled code immediately. Unsupported
 functions, methods, closures, tail/spread calls, and non-numeric arguments return
 an error instead of silently falling back; built-ins continue to use their
 runtime implementations.
+
+The CLI accepts `--jit-required`, and the Test262 runner accepts the same mode
+for selected subsets, for example:
+
+```bash
+node ci/runner.js --jit-required --focus "language/expressions/addition"
+```
+
+This is a strict diagnostic mode, not a claim that the full Test262 suite is
+JIT-compatible: uncovered functions intentionally fail instead of falling back.
 
 JIT entries use a tagged call frame and an explicit return/throw/deopt/suspend
 status ABI. The current backend only emits numeric values. The VM traces values

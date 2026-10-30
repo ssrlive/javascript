@@ -10,6 +10,7 @@ const RESULTS_FILE = 'test262-results.log';
 // Defaults
 let LIMIT = 100;
 let FAIL_ON_FAILURE = false;
+let JIT_REQUIRED = false;
 let CAP_MULTIPLIER = 5;
 let JOBS = Number(process.env.TEST262_JOBS || 8);
 // FOCUS_LIST: array of focus tokens. Accepts multiple `--focus` flags and comma-separated tokens.
@@ -28,6 +29,8 @@ for (let i = 0; i < argv.length; i++) {
     LIMIT = Number(argv[++i]);
   } else if (a === '--fail-on-failure') {
     FAIL_ON_FAILURE = true;
+  } else if (a === '--jit-required') {
+    JIT_REQUIRED = true;
   } else if (a === '--cap-multiplier') {
     CAP_MULTIPLIER = Number(argv[++i]);
   } else if (a === '--jobs') {
@@ -40,7 +43,8 @@ for (let i = 0; i < argv.length; i++) {
   } else if (a === '--keep-tmp') {
     KEEP_TMP = true;
   } else if (a === '--help') {
-    console.log('Usage: node ci/runner.js [--keep-tmp] [--jobs N] [--limit N] [--focus name[,name2]] (multiple --focus allowed)');
+    console.log('Usage: node ci/runner.js [--keep-tmp] [--jit-required] [--jobs N] [--limit N] [--focus name[,name2]] (multiple --focus allowed)');
+    console.log('  --jit-required fails tests when ordinary JavaScript functions fall back from native JIT code');
     console.log('  Append (filesonly) to a focus token to collect only top-level files, e.g. "a/(filesonly)",b/c');
     console.log(`  If --focus is omitted, defaults to: ${DEFAULT_FOCUS_DIRS.join(', ')}`);
     process.exit(0);
@@ -387,11 +391,13 @@ async function runAll() {
       let res;
       if (BIN) {
         const binArgs = [];
+        if (JIT_REQUIRED) binArgs.push('--jit-required');
         if (isModule) binArgs.push('--module');
         binArgs.push(tmpPath);
         res = await runCommandAsync(BIN, binArgs, { timeout: TIMEOUT_SECS * 1000, cwd: testCwd });
       } else {
         const cargoArgs = ['run', '--all-features', '--example', 'js-rs', '--'];
+        if (JIT_REQUIRED) cargoArgs.push('--jit-required');
         if (isModule) cargoArgs.push('--module');
         cargoArgs.push(tmpPath);
         res = await runCommandAsync('cargo', cargoArgs, { timeout: TIMEOUT_SECS * 1000, cwd: testCwd });

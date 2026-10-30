@@ -1,6 +1,19 @@
 #![cfg(feature = "jit")]
 
-use javascript::{JsRuntime, JsValue};
+use javascript::{DEFAULT_GC_OPCODE_BUDGET, JsRuntime, JsValue, evaluate_script_with_jit_required};
+
+#[test]
+fn jit_required_script_evaluation_uses_the_native_path() {
+    let result = evaluate_script_with_jit_required(
+        "function twice(value) { return value * 2; } twice(21);",
+        false,
+        None::<&std::path::Path>,
+        DEFAULT_GC_OPCODE_BUDGET,
+    )
+    .unwrap();
+
+    assert_eq!(result, "42");
+}
 
 #[test]
 fn jit_required_mode_executes_compiled_functions_on_the_first_call() {

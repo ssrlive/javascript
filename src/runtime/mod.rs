@@ -17,6 +17,8 @@ pub(crate) use crate::host_api::BoxedJsCallback;
 pub use crate::host_api::{JsObjectHandle, JsPromiseResolver, JsValue, ModuleLoader, ModuleSource};
 #[cfg(feature = "console")]
 pub use console::{ConsoleLevel, ConsoleMessage};
+#[cfg(feature = "jit")]
+pub use evaluation::evaluate_script_with_jit_required;
 pub use evaluation::{evaluate_script, evaluate_script_with_unwrap};
 use std::cell::RefCell;
 use std::rc::Rc;

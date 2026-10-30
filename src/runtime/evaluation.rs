@@ -27,6 +27,20 @@ pub fn evaluate_script<T: AsRef<str>, P: AsRef<std::path::Path>>(
     evaluate_script_with_unwrap(script, run_as_module, script_path, unwrap_top_level_promise, gc_opcode_budget)
 }
 
+#[cfg(feature = "jit")]
+/// Evaluate a script and fail if ordinary JavaScript calls cannot execute through the JIT.
+pub fn evaluate_script_with_jit_required<T: AsRef<str>, P: AsRef<std::path::Path>>(
+    script: T,
+    run_as_module: bool,
+    script_path: Option<P>,
+    gc_opcode_budget: usize,
+) -> Result<String, JSError> {
+    let unwrap_top_level_promise = script_path.is_none();
+    let mut runtime = JsRuntime::with_gc_opcode_budget(gc_opcode_budget)?;
+    runtime.set_jit_required(true);
+    runtime.eval_script_with_unwrap(script, run_as_module, script_path, unwrap_top_level_promise)
+}
+
 pub fn evaluate_script_with_unwrap<T: AsRef<str>, P: AsRef<std::path::Path>>(
     script: T,
     run_as_module: bool,

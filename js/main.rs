@@ -39,6 +39,10 @@ struct Cli {
     /// Execute as an ES module (enables import/export handling)
     #[arg(long, default_value_t = false)]
     module: bool,
+
+    /// Require ordinary JavaScript function calls to use compiled JIT code
+    #[arg(long, default_value_t = false)]
+    jit_required: bool,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
@@ -125,7 +129,11 @@ fn run_main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> 
         .unwrap_or(false);
     let run_as_module = cli.module || file_ext_is_mjs;
 
-    let result = evaluate_script(&script_content, run_as_module, script_path.as_ref(), cli.gc_opcode_budget);
+    let result = if cli.jit_required {
+        evaluate_script_with_jit_required(&script_content, run_as_module, script_path.as_ref(), cli.gc_opcode_budget)
+    } else {
+        evaluate_script(&script_content, run_as_module, script_path.as_ref(), cli.gc_opcode_budget)
+    };
 
     match result {
         Ok(result) => {

@@ -24,7 +24,7 @@ enum RunInnerStatus<'gc> {
 
 struct NativeJitCallOptions<'a, 'gc> {
     generic_value: bool,
-    upvalues: &'a [Value<'gc>],
+    upvalues: &'a [UpvalueCell<'gc>],
 }
 
 fn native_jit_exception_value<'gc>(exception: crate::host_api::JitValue) -> Result<Value<'gc>, JSError> {
@@ -32,6 +32,8 @@ fn native_jit_exception_value<'gc>(exception: crate::host_api::JitValue) -> Resu
         return Err(crate::raise_eval_error!("JIT exception has unsupported flags"));
     }
     match crate::host_api::JitValueTag::try_from(exception.tag) {
+        Ok(crate::host_api::JitValueTag::Undefined) => Ok(Value::Undefined),
+        Ok(crate::host_api::JitValueTag::Null) => Ok(Value::Null),
         Ok(crate::host_api::JitValueTag::Number) => exception
             .as_number()
             .map(Value::Number)
@@ -187,7 +189,7 @@ impl<'gc> VM<'gc> {
     ) -> Result<bool, JSError> {
         let argument_values = self.stack[callee_idx + 1..callee_idx + 1 + arg_count].to_vec();
         let mut root_values = argument_values.clone();
-        root_values.extend_from_slice(options.upvalues);
+        root_values.extend(options.upvalues.iter().map(|cell| cell.borrow().clone()));
         let root_base = self.jit_roots.len();
         let mut arguments = Vec::with_capacity(root_values.len());
         for (index, value) in root_values.iter().enumerate() {
@@ -200,7 +202,7 @@ impl<'gc> VM<'gc> {
             arguments.push(native_jit_value_for_vm(value, root_index)?);
         }
         self.jit_roots.extend(root_values.iter().cloned());
-        let outcome = crate::host_api::invoke_native_jit(function, &arguments, root_base);
+        let outcome = crate::host_api::invoke_native_jit(function, &mut arguments, root_base);
         let (status, result, exception) = match outcome {
             Ok(outcome) => outcome,
             Err(status) => {
@@ -208,6 +210,27 @@ impl<'gc> VM<'gc> {
                 return Err(crate::raise_eval_error!(format!("JIT returned invalid status {status}")));
             }
         };
+        if matches!(
+            status,
+            crate::host_api::NativeJitStatus::Returned | crate::host_api::NativeJitStatus::Threw
+        ) {
+            for (index, cell) in options.upvalues.iter().enumerate() {
+                let argument_index = argument_values.len() + index;
+                let Some(argument) = arguments.get(argument_index) else {
+                    self.jit_roots.truncate(root_base);
+                    return Err(crate::raise_eval_error!("JIT omitted a captured upvalue from its call frame"));
+                };
+                if argument.flags != 0 {
+                    self.jit_roots.truncate(root_base);
+                    return Err(crate::raise_eval_error!("JIT modified a captured upvalue with unsupported flags"));
+                }
+                let Some(value) = argument.as_number() else {
+                    self.jit_roots.truncate(root_base);
+                    return Err(crate::raise_eval_error!("JIT modified a captured upvalue with a non-numeric value"));
+                };
+                *cell.borrow_mut(ctx) = Value::Number(value);
+            }
+        }
         match status {
             crate::host_api::NativeJitStatus::Returned => {
                 let result = if options.generic_value {
@@ -1135,7 +1158,7 @@ impl<'gc> VM<'gc> {
                         function,
                         NativeJitCallOptions {
                             generic_value,
-                            upvalues: &captured_values,
+                            upvalues: captured_cells,
                         },
                         true,
                     )?;
@@ -1181,7 +1204,7 @@ impl<'gc> VM<'gc> {
                                     function,
                                     NativeJitCallOptions {
                                         generic_value,
-                                        upvalues: &captured_values,
+                                        upvalues: captured_cells,
                                     },
                                     false,
                                 )? {

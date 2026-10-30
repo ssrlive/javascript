@@ -115,7 +115,7 @@ impl JitValue {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub(crate) struct NativeJitFrame {
-    pub(crate) arguments: *const JitValue,
+    pub(crate) arguments: *mut JitValue,
     pub(crate) argument_count: usize,
     /// Absolute index of the first argument root in the VM's traced root vector.
     pub(crate) root_base: usize,
@@ -126,9 +126,9 @@ pub(crate) struct NativeJitFrame {
 }
 
 impl NativeJitFrame {
-    pub(crate) fn new(arguments: &[JitValue], root_base: usize) -> Self {
+    pub(crate) fn new(arguments: &mut [JitValue], root_base: usize) -> Self {
         Self {
-            arguments: arguments.as_ptr(),
+            arguments: arguments.as_mut_ptr(),
             argument_count: arguments.len(),
             root_base,
             root_count: arguments.len(),
@@ -165,7 +165,7 @@ pub(crate) type NativeJitFunction = unsafe extern "C" fn(*mut NativeJitFrame) ->
 
 pub(crate) fn invoke_native_jit(
     function: NativeJitFunction,
-    arguments: &[JitValue],
+    arguments: &mut [JitValue],
     root_base: usize,
 ) -> Result<(NativeJitStatus, JitValue, JitValue), i32> {
     let mut frame = NativeJitFrame::new(arguments, root_base);

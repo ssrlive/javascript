@@ -15,6 +15,7 @@ const DIRECT_NATIVE_OPCODES: &[&str] = &[
     "GetLocal",
     "GetUpvalue",
     "SetLocal",
+    "SetUpvalue",
     "Negate",
     "Not",
     "LessThan",
@@ -115,16 +116,21 @@ fn opcode_status(name: &str) -> (&'static str, &'static str) {
     } else if name == "Throw" {
         (
             "native",
-            "Number/Boolean throws propagate to VM handlers or supported local catch handlers",
+            "Number/Boolean/Undefined/Null throws propagate to VM handlers or supported local catch handlers",
         )
     } else if matches!(name, "SetupTry" | "TeardownTry") {
-        ("native", "no-binding/no-finally local handlers for verified Number/Boolean throws")
+        (
+            "native",
+            "no-binding/no-finally local handlers for verified Number/Boolean/Undefined/Null throws",
+        )
     } else if name == "Return" {
         ("native", "numeric results plus opaque tagged identity values")
     } else if name == "GetLocal" {
         ("native", "numeric/boolean locals plus tagged identity passthrough")
     } else if name == "GetUpvalue" {
         ("native", "numeric captures loaded through the traced closure-cell ABI")
+    } else if name == "SetUpvalue" {
+        ("native", "numeric captures written through the traced closure-cell ABI")
     } else if DIRECT_NATIVE_OPCODES.contains(&name) {
         ("native", "restricted numeric/boolean bytecode specialization")
     } else if AST_NATIVE_OPCODES.contains(&name) {

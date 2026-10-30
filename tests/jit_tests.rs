@@ -104,6 +104,90 @@ fn jit_warmed_numeric_closure_reads_upvalues() {
 }
 
 #[test]
+fn jit_required_mode_writes_numeric_closure_upvalues() {
+    let setup = r#"
+        function makeCounter(start) {
+            let captured = start;
+            const increment = function() {
+                captured = captured + 1;
+                return captured;
+            };
+            return increment;
+        }
+        var counter = makeCounter(40);
+    "#;
+    let mut interpreter = JsRuntime::new();
+    interpreter.eval(setup).unwrap();
+    let expected = interpreter.eval("counter() + counter();").unwrap();
+
+    let mut runtime = JsRuntime::new();
+    runtime.eval(setup).unwrap();
+    runtime.set_jit_required(true);
+    let result = runtime.eval("counter() + counter();").unwrap();
+
+    assert_eq!(result, expected);
+    assert_eq!(result, JsValue::Number(83.0));
+}
+
+#[test]
+fn jit_writes_numeric_closure_upvalues_before_propagating_exceptions() {
+    let setup = r#"
+        function makeCounter() {
+            let captured = 40;
+            const increment = function(shouldThrow) {
+                captured = captured + 1;
+                if (shouldThrow) throw 9;
+                return captured;
+            };
+            return increment;
+        }
+        const counter = makeCounter();
+    "#;
+    let exercise = r#"
+        try {
+            counter(1);
+        } catch (error) {}
+        counter(0);
+    "#;
+    let mut interpreter = JsRuntime::new();
+    interpreter.eval(setup).unwrap();
+    let expected = interpreter.eval(exercise).unwrap();
+    let mut runtime = JsRuntime::new();
+    runtime.eval(setup).unwrap();
+    runtime.set_jit_required(true);
+
+    let result = runtime.eval(exercise).unwrap();
+
+    assert_eq!(result, expected);
+    assert_eq!(result, JsValue::Number(42.0));
+}
+
+#[test]
+fn jit_warmed_numeric_closure_writes_shared_upvalues() {
+    let source = r#"
+        function makeCounter(start) {
+            let captured = start;
+            const increment = function() {
+                captured = captured + 1;
+                return captured;
+            };
+            return increment;
+        }
+        const counter = makeCounter(40);
+        counter();
+        counter() + counter();
+    "#;
+    let mut interpreter = JsRuntime::new();
+    let expected = interpreter.eval(source).unwrap();
+    let mut runtime = JsRuntime::new();
+
+    let result = runtime.eval(source).unwrap();
+
+    assert_eq!(result, expected);
+    assert_eq!(result, JsValue::Number(85.0));
+}
+
+#[test]
 fn jit_warmed_closures_fall_back_for_non_numeric_upvalues() {
     let setup = r#"
         function makeFormatter(suffix) {
@@ -125,6 +209,30 @@ fn jit_warmed_closures_fall_back_for_non_numeric_upvalues() {
 }
 
 #[test]
+fn jit_warmed_closure_mutations_fall_back_for_non_numeric_upvalues() {
+    let setup = r#"
+        function makeSetter(initial) {
+            const set = function(next) {
+                initial = next;
+                return initial;
+            };
+            return set;
+        }
+        var setCaptured = makeSetter("initial");
+    "#;
+    let mut interpreter = JsRuntime::new();
+    interpreter.eval(setup).unwrap();
+    let expected = interpreter.eval("setCaptured('updated'); setCaptured('again');").unwrap();
+
+    let mut runtime = JsRuntime::new();
+    runtime.eval(setup).unwrap();
+    let result = runtime.eval("setCaptured('updated'); setCaptured('again');").unwrap();
+
+    assert_eq!(result, expected);
+    assert_eq!(result, JsValue::String("again".to_string()));
+}
+
+#[test]
 fn jit_required_mode_rejects_closure_functions_that_read_captured_values() {
     let mut runtime = JsRuntime::new();
     runtime
@@ -141,6 +249,30 @@ fn jit_required_mode_rejects_closure_functions_that_read_captured_values() {
     runtime.set_jit_required(true);
 
     let error = runtime.eval("addCaptured(2);").unwrap_err();
+
+    assert!(error.to_string().contains("JIT-required mode"));
+}
+
+#[test]
+fn jit_required_mode_rejects_closure_mutations_of_non_numeric_upvalues() {
+    let mut runtime = JsRuntime::new();
+    runtime
+        .eval(
+            r#"
+            function makeSetter(initial) {
+                const set = function(next) {
+                    initial = next;
+                    return initial;
+                };
+                return set;
+            }
+            var setCaptured = makeSetter("initial");
+            "#,
+        )
+        .unwrap();
+    runtime.set_jit_required(true);
+
+    let error = runtime.eval("setCaptured('updated');").unwrap_err();
 
     assert!(error.to_string().contains("JIT-required mode"));
 }
@@ -385,17 +517,19 @@ fn jit_native_throw_reaches_interpreted_catch() {
 }
 
 #[test]
-fn jit_native_throw_reaches_supported_in_function_catch() {
+fn jit_native_undefined_throw_reaches_interpreted_catch() {
     let source = r#"
-        function catchWithoutBinding(value) {
-            try {
-                if (value < 0) throw true;
-                return 1;
-            } catch {
-                return 2;
-            }
+        function guard(value) {
+            if (value < 0) throw void 0;
+            return value + 1;
         }
-        catchWithoutBinding(-1) + catchWithoutBinding(1);
+        let caughtUndefined = false;
+        try {
+            guard(-1);
+        } catch (error) {
+            caughtUndefined = error === undefined;
+        }
+        guard(4) + (caughtUndefined ? 10 : 0);
     "#;
     let mut interpreter = JsRuntime::new();
     let expected = interpreter.eval(source).unwrap();
@@ -405,7 +539,58 @@ fn jit_native_throw_reaches_supported_in_function_catch() {
     let result = runtime.eval(source).unwrap();
 
     assert_eq!(result, expected);
-    assert_eq!(result, JsValue::Number(3.0));
+    assert_eq!(result, JsValue::Number(15.0));
+}
+
+#[test]
+fn jit_native_null_throw_reaches_interpreted_catch() {
+    let source = r#"
+        function guard(value) {
+            if (value < 0) throw null;
+            return value + 1;
+        }
+        let caughtNull = false;
+        try {
+            guard(-1);
+        } catch (error) {
+            caughtNull = error === null;
+        }
+        guard(4) + (caughtNull ? 10 : 0);
+    "#;
+    let mut interpreter = JsRuntime::new();
+    let expected = interpreter.eval(source).unwrap();
+    let mut runtime = JsRuntime::new();
+    runtime.set_jit_required(true);
+
+    let result = runtime.eval(source).unwrap();
+
+    assert_eq!(result, expected);
+    assert_eq!(result, JsValue::Number(15.0));
+}
+
+#[test]
+fn jit_native_throw_reaches_supported_in_function_catch() {
+    let source = r#"
+        function catchWithoutBinding(value) {
+            try {
+                if (value < -1) throw void 0;
+                if (value < 0) throw null;
+                return 1;
+            } catch {
+                return 2;
+            }
+        }
+        catchWithoutBinding(-2) + catchWithoutBinding(-1) + catchWithoutBinding(1);
+    "#;
+    let mut interpreter = JsRuntime::new();
+    let expected = interpreter.eval(source).unwrap();
+    let mut runtime = JsRuntime::new();
+    runtime.set_jit_required(true);
+
+    let result = runtime.eval(source).unwrap();
+
+    assert_eq!(result, expected);
+    assert_eq!(result, JsValue::Number(5.0));
 }
 
 #[test]

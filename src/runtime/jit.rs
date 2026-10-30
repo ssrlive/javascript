@@ -111,12 +111,13 @@ enum BytecodeStackKind {
     Number,
     Boolean,
     Undefined,
+    Null,
 }
 
 fn bytecode_stack_type(kind: BytecodeStackKind) -> cranelift_codegen::ir::Type {
     match kind {
         BytecodeStackKind::Number => types::F64,
-        BytecodeStackKind::Boolean | BytecodeStackKind::Undefined => types::I8,
+        BytecodeStackKind::Boolean | BytecodeStackKind::Undefined | BytecodeStackKind::Null => types::I8,
     }
 }
 
@@ -472,9 +473,11 @@ impl JitEngine {
                         match chunk.constants.get(constant_index) {
                             Some(crate::core::Value::Number(_)) => stack.push(BytecodeStackKind::Number),
                             Some(crate::core::Value::Boolean(_)) => stack.push(BytecodeStackKind::Boolean),
-                            Some(crate::core::Value::Undefined | crate::core::Value::Uninitialized) => {
+                            Some(crate::core::Value::Undefined) => {
                                 stack.push(BytecodeStackKind::Undefined);
                             }
+                            Some(crate::core::Value::Null) => stack.push(BytecodeStackKind::Null),
+                            Some(crate::core::Value::Uninitialized) => return Ok(None),
                             _ => return Ok(None),
                         }
                     }
@@ -495,6 +498,13 @@ impl JitEngine {
                         let upvalue_index = chunk.code[instruction.operand.start] as usize;
                         upvalue_count = upvalue_count.max(upvalue_index + 1);
                         stack.push(BytecodeStackKind::Number);
+                    }
+                    Opcode::SetUpvalue => {
+                        let upvalue_index = chunk.code[instruction.operand.start] as usize;
+                        if !matches!(stack.last(), Some(BytecodeStackKind::Number)) {
+                            return Ok(None);
+                        }
+                        upvalue_count = upvalue_count.max(upvalue_index + 1);
                     }
                     Opcode::SetLocal => {
                         let local_index = chunk.code[instruction.operand.start] as usize;
@@ -609,7 +619,15 @@ impl JitEngine {
                         has_return = true;
                     }
                     Opcode::Throw => {
-                        if !matches!(stack.pop(), Some(BytecodeStackKind::Number | BytecodeStackKind::Boolean)) {
+                        if !matches!(
+                            stack.pop(),
+                            Some(
+                                BytecodeStackKind::Number
+                                    | BytecodeStackKind::Boolean
+                                    | BytecodeStackKind::Undefined
+                                    | BytecodeStackKind::Null
+                            )
+                        ) {
                             return Ok(None);
                         }
                         if !instruction.exceptional_targets.is_empty() && (instruction.exceptional_targets.len() != 1 || !stack.is_empty())
@@ -820,6 +838,10 @@ impl JitEngine {
                                     stack.push(builder.ins().iconst(types::I8, 0));
                                     stack_kinds.push(BytecodeStackKind::Undefined);
                                 }
+                                crate::core::Value::Null => {
+                                    stack.push(builder.ins().iconst(types::I8, 0));
+                                    stack_kinds.push(BytecodeStackKind::Null);
+                                }
                                 _ => unreachable!("bytecode constant types were validated"),
                             }
                         }
@@ -840,6 +862,18 @@ impl JitEngine {
                             );
                             stack.push(value);
                             stack_kinds.push(BytecodeStackKind::Number);
+                        }
+                        Opcode::SetUpvalue => {
+                            let upvalue_index = chunk.code[instruction.operand.start] as usize;
+                            let argument_index = candidate.params.len() + upvalue_index;
+                            let value = *stack.last().expect("bytecode stack was validated");
+                            builder.ins().store(
+                                MemFlagsData::new(),
+                                value,
+                                arguments_pointer,
+                                (argument_index * std::mem::size_of::<NativeJitValue>() + std::mem::offset_of!(NativeJitValue, payload))
+                                    as i32,
+                            );
                         }
                         Opcode::SetLocal => {
                             let local_index = chunk.code[instruction.operand.start] as usize;
@@ -971,7 +1005,9 @@ impl JitEngine {
                                     builder.ins().icmp_imm_s(IntCC::Equal, truthy, 0)
                                 }
                                 BytecodeStackKind::Boolean => builder.ins().icmp_imm_s(IntCC::Equal, value, 0),
-                                BytecodeStackKind::Undefined => unreachable!("undefined truthiness was excluded by validation"),
+                                BytecodeStackKind::Undefined | BytecodeStackKind::Null => {
+                                    unreachable!("undefined/null truthiness was excluded by validation")
+                                }
                             };
                             let one = builder.ins().iconst(types::I8, 1);
                             let zero = builder.ins().iconst(types::I8, 0);
@@ -996,7 +1032,9 @@ impl JitEngine {
                                     builder.ins().fcmp(FloatCC::OrderedNotEqual, condition, zero)
                                 }
                                 BytecodeStackKind::Boolean => builder.ins().icmp_imm_s(IntCC::NotEqual, condition, 0),
-                                BytecodeStackKind::Undefined => unreachable!("undefined truthiness was excluded by validation"),
+                                BytecodeStackKind::Undefined | BytecodeStackKind::Null => {
+                                    unreachable!("undefined/null truthiness was excluded by validation")
+                                }
                             };
                             let target = bytecode_jump_target(chunk, instruction).expect("jump target was validated");
                             let fallthrough = native_blocks[&instruction.next_offset];
@@ -1039,7 +1077,8 @@ impl JitEngine {
                                 let tag = match kind {
                                     BytecodeStackKind::Number => JitValueTag::Number,
                                     BytecodeStackKind::Boolean => JitValueTag::Boolean,
-                                    BytecodeStackKind::Undefined => unreachable!("undefined throw was excluded by validation"),
+                                    BytecodeStackKind::Undefined => JitValueTag::Undefined,
+                                    BytecodeStackKind::Null => JitValueTag::Null,
                                 };
                                 let tag = builder.ins().iconst(types::I32, tag as i64);
                                 builder.ins().store(
@@ -1057,8 +1096,9 @@ impl JitEngine {
                                         let payload = builder.ins().uextend(types::I64, value);
                                         builder.ins().store(MemFlagsData::new(), payload, frame_pointer, payload_offset);
                                     }
-                                    BytecodeStackKind::Undefined => {
-                                        unreachable!("undefined throw was excluded by validation")
+                                    BytecodeStackKind::Undefined | BytecodeStackKind::Null => {
+                                        let payload = builder.ins().iconst(types::I64, 0);
+                                        builder.ins().store(MemFlagsData::new(), payload, frame_pointer, payload_offset);
                                     }
                                 }
                                 let threw = builder.ins().iconst(types::I32, NativeJitStatus::Threw as i64);
@@ -2301,8 +2341,8 @@ mod tests {
         engine.module.finalize_definitions().unwrap();
         let address = engine.module.get_finalized_function(function_id);
         let function = unsafe { std::mem::transmute::<*const u8, NativeJitFunction>(address) };
-        let arguments = [NativeJitValue::number(19.0), NativeJitValue::number(23.0)];
-        let (status, result, _) = crate::host_api::invoke_native_jit(function, &arguments, 0).unwrap();
+        let mut arguments = [NativeJitValue::number(19.0), NativeJitValue::number(23.0)];
+        let (status, result, _) = crate::host_api::invoke_native_jit(function, &mut arguments, 0).unwrap();
 
         assert_eq!(status, NativeJitStatus::Returned);
         assert_eq!(result.as_number(), Some(42.0));
@@ -2355,8 +2395,8 @@ mod tests {
         let function = unsafe { std::mem::transmute::<*const u8, NativeJitFunction>(address) };
         let cases: [(f64, f64); 3] = [(7.0, 42.0), (0.0, -1.0), (f64::NAN, -1.0)];
         for (argument, expected) in cases {
-            let arguments = [NativeJitValue::number(argument)];
-            let (status, result, _) = crate::host_api::invoke_native_jit(function, &arguments, 0).unwrap();
+            let mut arguments = [NativeJitValue::number(argument)];
+            let (status, result, _) = crate::host_api::invoke_native_jit(function, &mut arguments, 0).unwrap();
             assert_eq!(status, NativeJitStatus::Returned);
             let actual = result.as_number().unwrap();
             if expected.is_nan() {

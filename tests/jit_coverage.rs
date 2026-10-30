@@ -34,6 +34,8 @@ const DIRECT_NATIVE_OPCODES: &[&str] = &[
     "Increment",
     "Decrement",
     "Throw",
+    "SetupTry",
+    "TeardownTry",
 ];
 const INFRASTRUCTURE_OPCODES: &[&str] = &[
     "Mod",
@@ -112,8 +114,10 @@ fn opcode_status(name: &str) -> (&'static str, &'static str) {
     } else if name == "Throw" {
         (
             "native",
-            "Number/Boolean throws propagate to VM handlers; in-function handlers are not lowered",
+            "Number/Boolean throws propagate to VM handlers or supported local catch handlers",
         )
+    } else if matches!(name, "SetupTry" | "TeardownTry") {
+        ("native", "no-binding/no-finally local handlers for verified Number/Boolean throws")
     } else if name == "Return" {
         ("native", "numeric results plus opaque tagged identity values")
     } else if name == "GetLocal" {

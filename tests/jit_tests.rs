@@ -252,6 +252,30 @@ fn jit_native_throw_reaches_interpreted_catch() {
 }
 
 #[test]
+fn jit_native_throw_reaches_supported_in_function_catch() {
+    let source = r#"
+        function catchWithoutBinding(value) {
+            try {
+                if (value < 0) throw true;
+                return 1;
+            } catch {
+                return 2;
+            }
+        }
+        catchWithoutBinding(-1) + catchWithoutBinding(1);
+    "#;
+    let mut interpreter = JsRuntime::new();
+    let expected = interpreter.eval(source).unwrap();
+    let mut runtime = JsRuntime::new();
+    runtime.set_jit_required(true);
+
+    let result = runtime.eval(source).unwrap();
+
+    assert_eq!(result, expected);
+    assert_eq!(result, JsValue::Number(3.0));
+}
+
+#[test]
 fn jit_required_mode_rejects_handlers_inside_compiled_functions() {
     let mut runtime = JsRuntime::new();
     runtime.set_jit_required(true);

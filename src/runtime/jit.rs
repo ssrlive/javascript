@@ -27,6 +27,8 @@ fn is_local_slot_initializer(
     instruction_index: usize,
     chunk: &Chunk<'_>,
     parameter_count: usize,
+    local_count: usize,
+    is_function_entry: bool,
 ) -> bool {
     let instruction = &instructions[instruction_index];
     if instruction.opcode != Opcode::Constant {
@@ -39,9 +41,46 @@ fn is_local_slot_initializer(
     ) {
         return false;
     }
-    instructions
+    let boxed_local_initializer = instructions
         .get(instruction_index + 1)
-        .is_some_and(|next| next.opcode == Opcode::BoxLocal && chunk.code[next.operand.start] as usize >= parameter_count)
+        .is_some_and(|next| next.opcode == Opcode::BoxLocal && chunk.code[next.operand.start] as usize >= parameter_count);
+    if boxed_local_initializer {
+        return true;
+    }
+    if !is_function_entry || local_count <= parameter_count {
+        return false;
+    }
+
+    let mut next_local = parameter_count;
+    let mut next_instruction = 0;
+    while next_local < local_count {
+        let Some(initializer) = instructions.get(next_instruction) else {
+            break;
+        };
+        if initializer.opcode != Opcode::Constant {
+            break;
+        }
+        let initializer_index =
+            u16::from_le_bytes([chunk.code[initializer.operand.start], chunk.code[initializer.operand.start + 1]]) as usize;
+        if !matches!(
+            chunk.constants.get(initializer_index),
+            Some(crate::core::Value::Undefined | crate::core::Value::Uninitialized)
+        ) {
+            break;
+        }
+        if next_instruction == instruction_index {
+            return true;
+        }
+        next_instruction += 1;
+        next_local += 1;
+        if instructions
+            .get(next_instruction)
+            .is_some_and(|next| next.opcode == Opcode::BoxLocal && chunk.code[next.operand.start] as usize == next_local - 1)
+        {
+            next_instruction += 1;
+        }
+    }
+    false
 }
 
 #[derive(Clone)]
@@ -71,12 +110,13 @@ enum JitValue {
 enum BytecodeStackKind {
     Number,
     Boolean,
+    Undefined,
 }
 
 fn bytecode_stack_type(kind: BytecodeStackKind) -> cranelift_codegen::ir::Type {
     match kind {
         BytecodeStackKind::Number => types::F64,
-        BytecodeStackKind::Boolean => types::I8,
+        BytecodeStackKind::Boolean | BytecodeStackKind::Undefined => types::I8,
     }
 }
 
@@ -369,13 +409,34 @@ impl JitEngine {
             .filter(|entry| *entry != candidate.ip)
             .collect::<HashSet<_>>();
         let mut incoming_stacks = vec![None::<Vec<BytecodeStackKind>>; cfg.blocks.len()];
-        let local_count = chunk.fn_local_names.get(&candidate.ip).map_or(candidate.params.len(), Vec::len);
+        let function_end = chunk
+            .fn_names
+            .keys()
+            .copied()
+            .filter(|entry| *entry > candidate.ip)
+            .min()
+            .unwrap_or(chunk.code.len());
+        let bytecode_local_count = cfg
+            .instructions
+            .iter()
+            .filter(|instruction| candidate.ip <= instruction.offset && instruction.offset < function_end)
+            .filter(|instruction| matches!(instruction.opcode, Opcode::GetLocal | Opcode::SetLocal | Opcode::BoxLocal))
+            .map(|instruction| chunk.code[instruction.operand.start] as usize + 1)
+            .max()
+            .unwrap_or(candidate.params.len());
+        let local_count = chunk
+            .fn_local_names
+            .get(&candidate.ip)
+            .map_or(candidate.params.len(), Vec::len)
+            .max(bytecode_local_count);
         if local_count < candidate.params.len() || local_count > u8::MAX as usize + 1 {
             return Ok(None);
         }
         let mut initial_locals = vec![None; local_count];
         initial_locals[..candidate.params.len()].fill(Some(BytecodeStackKind::Number));
         let mut local_types = initial_locals.clone();
+        let mut local_type_conflicts = vec![false; local_count];
+        let mut local_reads = vec![false; local_count];
         let mut incoming_locals = vec![None::<Vec<Option<BytecodeStackKind>>>; cfg.blocks.len()];
         let mut worklist = VecDeque::from([entry_index]);
         let mut reachable_blocks = Vec::new();
@@ -385,9 +446,6 @@ impl JitEngine {
 
         while let Some(block_index) = worklist.pop_front() {
             let block = &cfg.blocks[block_index];
-            if !block.exceptional_successors.is_empty() {
-                return Ok(None);
-            }
             reachable_blocks.push(block_index);
             let mut stack = incoming_stacks[block_index]
                 .clone()
@@ -395,24 +453,36 @@ impl JitEngine {
             let mut locals = incoming_locals[block_index].clone().expect("reachable blocks have incoming locals");
             let instructions = &cfg.instructions[block.instruction_range.clone()];
             for (instruction_index, instruction) in instructions.iter().enumerate() {
-                if !instruction.exceptional_targets.is_empty() {
-                    return Ok(None);
-                }
                 match instruction.opcode {
                     Opcode::Constant => {
                         let constant_index =
                             u16::from_le_bytes([chunk.code[instruction.operand.start], chunk.code[instruction.operand.start + 1]]) as usize;
-                        if is_local_slot_initializer(instructions, instruction_index, chunk, candidate.params.len()) {
+                        if is_local_slot_initializer(
+                            instructions,
+                            instruction_index,
+                            chunk,
+                            candidate.params.len(),
+                            local_count,
+                            block_index == entry_index,
+                        ) {
                             continue;
                         }
                         match chunk.constants.get(constant_index) {
                             Some(crate::core::Value::Number(_)) => stack.push(BytecodeStackKind::Number),
                             Some(crate::core::Value::Boolean(_)) => stack.push(BytecodeStackKind::Boolean),
+                            Some(crate::core::Value::Undefined | crate::core::Value::Uninitialized) => {
+                                stack.push(BytecodeStackKind::Undefined);
+                            }
                             _ => return Ok(None),
                         }
                     }
                     Opcode::GetLocal => {
                         let local_index = chunk.code[instruction.operand.start] as usize;
+                        if let Some(read) = local_reads.get_mut(local_index) {
+                            *read = true;
+                        } else {
+                            return Ok(None);
+                        }
                         let Some(Some(local_kind @ (BytecodeStackKind::Number | BytecodeStackKind::Boolean))) = locals.get(local_index)
                         else {
                             return Ok(None);
@@ -421,13 +491,20 @@ impl JitEngine {
                     }
                     Opcode::SetLocal => {
                         let local_index = chunk.code[instruction.operand.start] as usize;
-                        let Some(value_kind @ (BytecodeStackKind::Number | BytecodeStackKind::Boolean)) = stack.last().copied() else {
+                        let Some(value_kind) = stack.last().copied() else {
                             return Ok(None);
                         };
-                        if local_index >= locals.len() || local_types[local_index].is_some_and(|kind| kind != value_kind) {
+                        if local_index >= locals.len() {
                             return Ok(None);
                         }
-                        local_types[local_index] = Some(value_kind);
+                        if local_type_conflicts[local_index] {
+                            local_types[local_index] = None;
+                        } else if local_types[local_index].is_some_and(|kind| kind != value_kind) {
+                            local_type_conflicts[local_index] = true;
+                            local_types[local_index] = None;
+                        } else {
+                            local_types[local_index] = Some(value_kind);
+                        }
                         locals[local_index] = Some(value_kind);
                     }
                     Opcode::BoxLocal => {
@@ -513,7 +590,7 @@ impl JitEngine {
                         }
                     }
                     Opcode::JumpIfFalse | Opcode::JumpIfTrue => {
-                        if stack.pop().is_none() {
+                        if !matches!(stack.pop(), Some(BytecodeStackKind::Number | BytecodeStackKind::Boolean)) {
                             return Ok(None);
                         }
                     }
@@ -528,7 +605,20 @@ impl JitEngine {
                         if !matches!(stack.pop(), Some(BytecodeStackKind::Number | BytecodeStackKind::Boolean)) {
                             return Ok(None);
                         }
+                        if !instruction.exceptional_targets.is_empty() && (instruction.exceptional_targets.len() != 1 || !stack.is_empty())
+                        {
+                            return Ok(None);
+                        }
                     }
+                    Opcode::SetupTry => {
+                        let binding =
+                            u16::from_le_bytes([chunk.code[instruction.operand.start + 4], chunk.code[instruction.operand.start + 5]]);
+                        let flags = chunk.code[instruction.operand.start + 6];
+                        if binding != u16::MAX || flags & 1 != 0 {
+                            return Ok(None);
+                        }
+                    }
+                    Opcode::TeardownTry => {}
                     _ => return Ok(None),
                 }
             }
@@ -545,6 +635,31 @@ impl JitEngine {
             if last.opcode == Opcode::Throw {
                 if !block.successors.is_empty() {
                     return Ok(None);
+                }
+                if let Some(&target) = last.exceptional_targets.first() {
+                    if other_function_entries.contains(&target) {
+                        return Ok(None);
+                    }
+                    let Some(&target_index) = block_indices.get(&target) else {
+                        return Ok(None);
+                    };
+                    let stack_is_new = incoming_stacks[target_index].is_none();
+                    if incoming_stacks[target_index].as_ref().is_some_and(|existing| existing != &stack) {
+                        return Ok(None);
+                    }
+                    let locals_are_new = incoming_locals[target_index].is_none();
+                    if incoming_locals[target_index].as_ref().is_some_and(|existing| existing != &locals) {
+                        return Ok(None);
+                    }
+                    if stack_is_new {
+                        incoming_stacks[target_index] = Some(stack);
+                    }
+                    if locals_are_new {
+                        incoming_locals[target_index] = Some(locals);
+                    }
+                    if stack_is_new || locals_are_new {
+                        worklist.push_back(target_index);
+                    }
                 }
                 continue;
             }
@@ -590,6 +705,13 @@ impl JitEngine {
         }
 
         if !has_return {
+            return Ok(None);
+        }
+        if local_type_conflicts
+            .iter()
+            .zip(local_reads.iter())
+            .any(|(conflict, read)| *conflict && *read)
+        {
             return Ok(None);
         }
 
@@ -668,7 +790,14 @@ impl JitEngine {
                             let constant_index =
                                 u16::from_le_bytes([chunk.code[instruction.operand.start], chunk.code[instruction.operand.start + 1]])
                                     as usize;
-                            if is_local_slot_initializer(instructions, instruction_index, chunk, candidate.params.len()) {
+                            if is_local_slot_initializer(
+                                instructions,
+                                instruction_index,
+                                chunk,
+                                candidate.params.len(),
+                                local_count,
+                                block_index == entry_index,
+                            ) {
                                 continue;
                             }
                             match chunk.constants[constant_index] {
@@ -680,6 +809,10 @@ impl JitEngine {
                                     stack.push(builder.ins().iconst(types::I8, i64::from(value)));
                                     stack_kinds.push(BytecodeStackKind::Boolean);
                                 }
+                                crate::core::Value::Undefined | crate::core::Value::Uninitialized => {
+                                    stack.push(builder.ins().iconst(types::I8, 0));
+                                    stack_kinds.push(BytecodeStackKind::Undefined);
+                                }
                                 _ => unreachable!("bytecode constant types were validated"),
                             }
                         }
@@ -690,7 +823,9 @@ impl JitEngine {
                         }
                         Opcode::SetLocal => {
                             let local_index = chunk.code[instruction.operand.start] as usize;
-                            builder.def_var(locals[local_index], *stack.last().expect("bytecode stack was validated"));
+                            if !local_type_conflicts[local_index] {
+                                builder.def_var(locals[local_index], *stack.last().expect("bytecode stack was validated"));
+                            }
                         }
                         Opcode::BoxLocal => {
                             // Closure bytecodes are excluded, so this scalar local needs no heap cell.
@@ -816,6 +951,7 @@ impl JitEngine {
                                     builder.ins().icmp_imm_s(IntCC::Equal, truthy, 0)
                                 }
                                 BytecodeStackKind::Boolean => builder.ins().icmp_imm_s(IntCC::Equal, value, 0),
+                                BytecodeStackKind::Undefined => unreachable!("undefined truthiness was excluded by validation"),
                             };
                             let one = builder.ins().iconst(types::I8, 1);
                             let zero = builder.ins().iconst(types::I8, 0);
@@ -840,6 +976,7 @@ impl JitEngine {
                                     builder.ins().fcmp(FloatCC::OrderedNotEqual, condition, zero)
                                 }
                                 BytecodeStackKind::Boolean => builder.ins().icmp_imm_s(IntCC::NotEqual, condition, 0),
+                                BytecodeStackKind::Undefined => unreachable!("undefined truthiness was excluded by validation"),
                             };
                             let target = bytecode_jump_target(chunk, instruction).expect("jump target was validated");
                             let fallthrough = native_blocks[&instruction.next_offset];
@@ -874,31 +1011,41 @@ impl JitEngine {
                         Opcode::Throw => {
                             let value = stack.pop().expect("bytecode stack was validated");
                             let kind = stack_kinds.pop().expect("bytecode stack kinds were validated");
-                            let exception_offset = std::mem::offset_of!(NativeJitFrame, exception) as i32;
-                            let tag = match kind {
-                                BytecodeStackKind::Number => JitValueTag::Number,
-                                BytecodeStackKind::Boolean => JitValueTag::Boolean,
-                            };
-                            let tag = builder.ins().iconst(types::I32, tag as i64);
-                            builder.ins().store(
-                                MemFlagsData::new(),
-                                tag,
-                                frame_pointer,
-                                exception_offset + std::mem::offset_of!(NativeJitValue, tag) as i32,
-                            );
-                            let payload_offset = exception_offset + std::mem::offset_of!(NativeJitValue, payload) as i32;
-                            match kind {
-                                BytecodeStackKind::Number => {
-                                    builder.ins().store(MemFlagsData::new(), value, frame_pointer, payload_offset);
+                            if let Some(target) = instruction.exceptional_targets.first() {
+                                let arguments = stack.iter().copied().map(BlockArg::Value).collect::<Vec<_>>();
+                                builder.ins().jump(native_blocks[target], &arguments);
+                            } else {
+                                let exception_offset = std::mem::offset_of!(NativeJitFrame, exception) as i32;
+                                let tag = match kind {
+                                    BytecodeStackKind::Number => JitValueTag::Number,
+                                    BytecodeStackKind::Boolean => JitValueTag::Boolean,
+                                    BytecodeStackKind::Undefined => unreachable!("undefined throw was excluded by validation"),
+                                };
+                                let tag = builder.ins().iconst(types::I32, tag as i64);
+                                builder.ins().store(
+                                    MemFlagsData::new(),
+                                    tag,
+                                    frame_pointer,
+                                    exception_offset + std::mem::offset_of!(NativeJitValue, tag) as i32,
+                                );
+                                let payload_offset = exception_offset + std::mem::offset_of!(NativeJitValue, payload) as i32;
+                                match kind {
+                                    BytecodeStackKind::Number => {
+                                        builder.ins().store(MemFlagsData::new(), value, frame_pointer, payload_offset);
+                                    }
+                                    BytecodeStackKind::Boolean => {
+                                        let payload = builder.ins().uextend(types::I64, value);
+                                        builder.ins().store(MemFlagsData::new(), payload, frame_pointer, payload_offset);
+                                    }
+                                    BytecodeStackKind::Undefined => {
+                                        unreachable!("undefined throw was excluded by validation")
+                                    }
                                 }
-                                BytecodeStackKind::Boolean => {
-                                    let payload = builder.ins().uextend(types::I64, value);
-                                    builder.ins().store(MemFlagsData::new(), payload, frame_pointer, payload_offset);
-                                }
+                                let threw = builder.ins().iconst(types::I32, NativeJitStatus::Threw as i64);
+                                builder.ins().return_(&[threw]);
                             }
-                            let threw = builder.ins().iconst(types::I32, NativeJitStatus::Threw as i64);
-                            builder.ins().return_(&[threw]);
                         }
+                        Opcode::SetupTry | Opcode::TeardownTry => {}
                         _ => unreachable!("bytecode instruction set was validated"),
                     }
                 }

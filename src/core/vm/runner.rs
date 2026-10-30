@@ -2854,19 +2854,7 @@ impl<'gc> VM<'gc> {
             _ => {
                 let base = to_number(&a);
                 let exp = to_number(&b);
-                #[allow(clippy::if_same_then_else)]
-                let result = if exp.is_nan() {
-                    f64::NAN
-                } else if exp == 0.0 {
-                    1.0
-                } else if base.is_nan() {
-                    f64::NAN
-                } else if base.abs() == 1.0 && exp.is_infinite() {
-                    f64::NAN
-                } else {
-                    base.powf(exp)
-                };
-                self.stack.push(Value::Number(result));
+                self.stack.push(Value::Number(number_pow(base, exp)));
             }
         }
         Ok(OpcodeAction::Continue)

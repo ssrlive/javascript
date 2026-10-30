@@ -125,7 +125,7 @@ fn to_number<'gc>(val: &Value<'gc>) -> f64 {
 }
 
 // JS ToUint32 (ECMAScript 7.1.7) used by bitwise/shift operators.
-fn to_uint32(n: f64) -> u32 {
+pub(crate) fn to_uint32(n: f64) -> u32 {
     if n.is_nan() || n == 0.0 || !n.is_finite() {
         return 0;
     }
@@ -134,8 +134,20 @@ fn to_uint32(n: f64) -> u32 {
 }
 
 // JS ToInt32 derived from ToUint32.
-fn to_int32(n: f64) -> i32 {
+pub(crate) fn to_int32(n: f64) -> i32 {
     to_uint32(n) as i32
+}
+
+pub(crate) fn number_pow(base: f64, exponent: f64) -> f64 {
+    if exponent.is_nan() {
+        f64::NAN
+    } else if exponent == 0.0 {
+        1.0
+    } else if base.is_nan() || (base.abs() == 1.0 && exponent.is_infinite()) {
+        f64::NAN
+    } else {
+        base.powf(exponent)
+    }
 }
 
 /// Returns true if the given UTF-16 code unit is a JS WhiteSpace or LineTerminator.

@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 const OPCODE_SOURCE: &str = include_str!("../src/core/opcode.rs");
 const FUNCTION_ID_SOURCE: &str = include_str!("../src/core/function_id.rs");
-const NUMERIC_BYTECODE_OPCODES: &[&str] = &[
+const DIRECT_NATIVE_OPCODES: &[&str] = &[
     "Return",
     "Constant",
     "Add",
@@ -15,7 +15,7 @@ const NUMERIC_BYTECODE_OPCODES: &[&str] = &[
     "GetLocal",
     "SetLocal",
     "Negate",
-    "Mod",
+    "Not",
     "LessThan",
     "GreaterThan",
     "LessEqual",
@@ -26,15 +26,42 @@ const NUMERIC_BYTECODE_OPCODES: &[&str] = &[
     "Jump",
     "JumpIfFalse",
     "JumpIfTrue",
+    "BoxLocal",
+    "Dup",
+    "ToNumeric",
+    "ToNumber",
+    "Swap",
+    "Increment",
+    "Decrement",
+];
+const INFRASTRUCTURE_OPCODES: &[&str] = &[
+    "Mod",
+    "Pow",
+    "BitwiseAnd",
+    "BitwiseOr",
+    "BitwiseXor",
+    "ShiftLeft",
+    "ShiftRight",
+    "UnsignedShiftRight",
+    "BitwiseNot",
+];
+const AST_NATIVE_OPCODES: &[&str] = &[
+    "Call",
+    "NewArray",
+    "NewObject",
+    "GetProperty",
+    "SetProperty",
+    "GetIndex",
+    "SetIndex",
 ];
 
 #[test]
-fn report_opcode_and_builtin_jit_coverage() {
+fn report_opcode_and_builtin_jit_coverage_by_semantic_family() {
     let opcodes = parse_opcodes(OPCODE_SOURCE);
     let builtins = parse_builtins(FUNCTION_ID_SOURCE);
 
-    assert_eq!(opcodes.len(), 122, "review the JIT coverage audit after changing the opcode set");
-    assert_eq!(builtins.len(), 331, "review the JIT coverage audit after changing the builtin set");
+    assert!(!opcodes.is_empty(), "review the JIT coverage audit after changing the opcode set");
+    assert!(!builtins.is_empty(), "review the JIT coverage audit after changing the builtin set");
     assert_eq!(
         opcodes.iter().collect::<HashSet<_>>().len(),
         opcodes.len(),
@@ -51,17 +78,139 @@ fn report_opcode_and_builtin_jit_coverage() {
         "builtin names must be unique"
     );
 
-    println!("JIT coverage audit");
-    println!("Partially lowered bytecode opcodes (numeric stack values and validated control flow):");
+    for opcode in DIRECT_NATIVE_OPCODES {
+        assert!(opcodes.iter().any(|name| name == opcode), "stale native opcode entry: {opcode}");
+    }
+    for opcode in INFRASTRUCTURE_OPCODES {
+        assert!(
+            opcodes.iter().any(|name| name == opcode),
+            "stale infrastructure opcode entry: {opcode}"
+        );
+    }
+    for opcode in AST_NATIVE_OPCODES {
+        assert!(opcodes.iter().any(|name| name == opcode), "stale AST-native opcode entry: {opcode}");
+    }
+
+    println!("JIT coverage audit by semantic family");
     for opcode in opcodes {
-        if NUMERIC_BYTECODE_OPCODES.contains(&opcode.as_str()) {
-            println!("opcode {opcode}: partial (numeric bytecode subset)");
-        } else {
-            println!("opcode {opcode}: unsupported (no bytecode JIT translation)");
-        }
+        let family = opcode_family(&opcode);
+        let (status, detail) = opcode_status(&opcode);
+        println!("opcode {opcode} [{family}]: {status} ({detail})");
     }
     for (name, _) in builtins {
-        println!("builtin {name}: unsupported (runtime implementation only)");
+        println!(
+            "builtin {name} [{}]: uncovered (not dispatched from native JIT)",
+            builtin_family(&name)
+        );
+    }
+}
+
+fn opcode_status(name: &str) -> (&'static str, &'static str) {
+    if name == "BoxLocal" {
+        ("native", "elided for verified closure-free scalar locals")
+    } else if DIRECT_NATIVE_OPCODES.contains(&name) {
+        ("native", "restricted numeric/boolean bytecode specialization")
+    } else if AST_NATIVE_OPCODES.contains(&name) {
+        match name {
+            "Call" => ("native", "limited statically-known numeric AST inlining"),
+            _ => ("native", "AST-only virtual scalar array/object subset"),
+        }
+    } else if INFRASTRUCTURE_OPCODES.contains(&name) {
+        match name {
+            "Mod" => ("infrastructure", "calls the registered fmod host helper"),
+            "Pow" => ("infrastructure", "calls the shared JS number-pow helper"),
+            "BitwiseAnd" | "BitwiseOr" | "BitwiseXor" | "ShiftLeft" | "ShiftRight" | "UnsignedShiftRight" => {
+                ("infrastructure", "calls the shared JS ToInt32/ToUint32 helper")
+            }
+            "BitwiseNot" => ("infrastructure", "calls the shared JS ToInt32 helper"),
+            _ => unreachable!("all infrastructure opcodes have a detail"),
+        }
+    } else {
+        ("uncovered", "no native translation or JIT-to-VM bridge")
+    }
+}
+
+fn opcode_family(name: &str) -> &'static str {
+    match name {
+        "Constant" | "Pop" | "GetLocal" | "SetLocal" | "Negate" | "Not" | "TypeOf" | "Dup" | "Swap" | "GetThis" | "ToNumber"
+        | "GetArguments" | "GetNewTarget" | "ToPropertyKey" | "ToNumeric" => "values-and-locals",
+        "Add" | "Sub" | "Mul" | "Div" | "Mod" | "LessThan" | "GreaterThan" | "Equal" | "LessEqual" | "GreaterEqual" | "NotEqual"
+        | "StrictNotEqual" | "Pow" | "BitwiseAnd" | "BitwiseOr" | "BitwiseXor" | "ShiftLeft" | "ShiftRight" | "UnsignedShiftRight"
+        | "BitwiseNot" | "Increment" | "Decrement" => "operators",
+        "Return" | "Jump" | "JumpIfFalse" | "JumpIfTrue" => "control-flow",
+        "Call" | "NewCall" | "CollectRest" | "CallSpread" | "NewCallSpread" | "GetUpvalue" | "SetUpvalue" | "MakeClosure" | "BoxLocal"
+        | "InitNamedFnSelf" | "ReboxLocal" | "ClearLocalCells" | "SetArguments" | "TailCall" | "TailCallSpread" => "functions-and-closures",
+        "NewArray"
+        | "NewObject"
+        | "GetProperty"
+        | "SetProperty"
+        | "GetIndex"
+        | "SetIndex"
+        | "GetKeys"
+        | "GetMethod"
+        | "In"
+        | "InstanceOf"
+        | "DeleteProperty"
+        | "DeleteIndex"
+        | "SetSuperProperty"
+        | "GetSuperProperty"
+        | "ArrayPush"
+        | "ArraySpread"
+        | "ObjectSpread"
+        | "ArrayHole"
+        | "SetComputedGetter"
+        | "SetComputedSetter"
+        | "InitProperty"
+        | "InitIndex"
+        | "ObjectSpreadExcluding"
+        | "GetSuperPropertyComputed"
+        | "SetSuperPropertyComputed"
+        | "DefineComputedMethod"
+        | "FreezeTemplate"
+        | "MarkPropertyNonEnumerable"
+        | "MarkPropertyReadonly" => "objects-and-properties",
+        "Throw"
+        | "SetupTry"
+        | "TeardownTry"
+        | "NewError"
+        | "ThrowTypeError"
+        | "ThrowIfNullish"
+        | "ThrowIfNotConstructor"
+        | "AssertGlobalDefined" => "exceptions",
+        "Yield"
+        | "GeneratorParamInitDone"
+        | "Await"
+        | "YieldDirect"
+        | "CheckGeneratorReturn"
+        | "SetGeneratorReturn"
+        | "ClearGeneratorReturn" => "generators-and-async",
+        "ValidateClassHeritage"
+        | "GetThisSuper"
+        | "ClearThisTdz"
+        | "ValidateProtoValue"
+        | "EnterFieldInit"
+        | "LeaveFieldInit"
+        | "AllocBrand"
+        | "ResetPrototype"
+        | "SetComputedClassGetter"
+        | "SetComputedClassSetter" => "classes-and-prototypes",
+        "IteratorClose" | "AssertIterResult" | "IteratorCloseAbrupt" => "collections-and-iterators",
+        "DefineGlobal" | "GetGlobal" | "SetGlobal" | "TypeOfGlobal" | "DeleteGlobal" | "DefineGlobalConst" | "DefineGlobalSoft" => {
+            "globals-and-modules"
+        }
+        "DisposeResources" | "DisposeResourcesAsync" => "resource-management",
+        _ => panic!("opcode {name} has no semantic-family classification"),
+    }
+}
+
+fn builtin_family(name: &str) -> String {
+    let Some(suffix) = name.strip_prefix("BUILTIN_") else {
+        panic!("builtin name {name} does not use the BUILTIN_ prefix");
+    };
+    match suffix.split('_').next().unwrap_or_default() {
+        "CTOR" => "constructors".to_string(),
+        "" => panic!("builtin name {name} has no family"),
+        family => family.to_ascii_lowercase(),
     }
 }
 

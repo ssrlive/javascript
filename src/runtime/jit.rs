@@ -244,19 +244,19 @@ impl JitEngine {
             cfg.blocks.len(),
             cfg.exception_handlers.len()
         );
-        let declarations = collect_function_declarations(statements);
+        let function_bodies = collect_function_bodies(statements);
         let mut candidates = Vec::new();
         let mut name_counts = HashMap::<&str, usize>::new();
         for name in chunk.fn_names.values() {
             *name_counts.entry(name).or_default() += 1;
         }
-        let inline_functions = collect_inline_functions(&declarations, chunk, &name_counts);
+        let inline_functions = collect_inline_functions(&function_bodies, chunk, &name_counts);
 
         for (ip, name) in &chunk.fn_names {
             if name_counts.get(name.as_str()) != Some(&1) {
                 continue;
             }
-            let Some((params, body)) = declarations.get(name.as_str()) else {
+            let Some((params, body)) = function_bodies.get(name.as_str()) else {
                 continue;
             };
             let Some(params) = simple_parameters(params) else {
@@ -294,7 +294,7 @@ impl JitEngine {
                     Ok(Some(function)) => Ok((function, true)),
                     Ok(None) if is_supported_function(&candidate.params, candidate.body, &inline_functions) => self
                         .compile_function(&candidate, &inline_functions)
-                        .map(|function| (function, false)),
+                        .map(|(ip, arity, function)| ((ip, arity, 0, function), false)),
                     Ok(None) => {
                         log::debug!("JIT skipped function {}: unsupported bytecode semantics", candidate.name);
                         continue;
@@ -323,12 +323,13 @@ impl JitEngine {
 
         compiled
             .into_iter()
-            .map(|((ip, arity, function_id), dependencies, generic_value)| {
+            .map(|((ip, arity, upvalue_count, function_id), dependencies, generic_value)| {
                 let address = self.module.get_finalized_function(function_id);
                 let function = unsafe { std::mem::transmute::<*const u8, NativeJitFunction>(address) };
                 NativeJitRegistration {
                     ip,
                     arity,
+                    upvalue_count,
                     function,
                     generic_value,
                     dependencies,
@@ -337,7 +338,7 @@ impl JitEngine {
             .collect()
     }
 
-    fn compile_identity_function(&mut self, candidate: &FunctionCandidate<'_>) -> Result<(usize, usize, FuncId), String> {
+    fn compile_identity_function(&mut self, candidate: &FunctionCandidate<'_>) -> Result<(usize, usize, usize, FuncId), String> {
         let function_name = format!("js_{}_{}", self.next_function_id, candidate.name);
         self.next_function_id += 1;
         let pointer_type = self.module.target_config().pointer_type();
@@ -383,7 +384,7 @@ impl JitEngine {
             .define_function(function_id, &mut context)
             .map_err(|error| error.to_string())?;
         self.module.clear_context(&mut context);
-        Ok((candidate.ip, candidate.params.len(), function_id))
+        Ok((candidate.ip, candidate.params.len(), 0, function_id))
     }
 
     fn compile_bytecode_function(
@@ -391,7 +392,7 @@ impl JitEngine {
         candidate: &FunctionCandidate<'_>,
         cfg: &bytecode::ControlFlowGraph,
         chunk: &Chunk<'_>,
-    ) -> Result<Option<(usize, usize, FuncId)>, String> {
+    ) -> Result<Option<(usize, usize, usize, FuncId)>, String> {
         let Some(entry_index) = cfg.blocks.iter().position(|block| block.start == candidate.ip) else {
             return Ok(None);
         };
@@ -437,6 +438,7 @@ impl JitEngine {
         let mut local_types = initial_locals.clone();
         let mut local_type_conflicts = vec![false; local_count];
         let mut local_reads = vec![false; local_count];
+        let mut upvalue_count = 0;
         let mut incoming_locals = vec![None::<Vec<Option<BytecodeStackKind>>>; cfg.blocks.len()];
         let mut worklist = VecDeque::from([entry_index]);
         let mut reachable_blocks = Vec::new();
@@ -488,6 +490,11 @@ impl JitEngine {
                             return Ok(None);
                         };
                         stack.push(*local_kind);
+                    }
+                    Opcode::GetUpvalue => {
+                        let upvalue_index = chunk.code[instruction.operand.start] as usize;
+                        upvalue_count = upvalue_count.max(upvalue_index + 1);
+                        stack.push(BytecodeStackKind::Number);
                     }
                     Opcode::SetLocal => {
                         let local_index = chunk.code[instruction.operand.start] as usize;
@@ -821,6 +828,19 @@ impl JitEngine {
                             stack.push(builder.use_var(locals[local_index]));
                             stack_kinds.push(local_types[local_index].expect("bytecode local kinds were validated"));
                         }
+                        Opcode::GetUpvalue => {
+                            let upvalue_index = chunk.code[instruction.operand.start] as usize;
+                            let argument_index = candidate.params.len() + upvalue_index;
+                            let value = builder.ins().load(
+                                types::F64,
+                                MemFlagsData::new(),
+                                arguments_pointer,
+                                (argument_index * std::mem::size_of::<NativeJitValue>() + std::mem::offset_of!(NativeJitValue, payload))
+                                    as i32,
+                            );
+                            stack.push(value);
+                            stack_kinds.push(BytecodeStackKind::Number);
+                        }
                         Opcode::SetLocal => {
                             let local_index = chunk.code[instruction.operand.start] as usize;
                             if !local_type_conflicts[local_index] {
@@ -1068,7 +1088,7 @@ impl JitEngine {
             .map_err(|error| error.to_string())?;
         self.module.clear_context(&mut context);
 
-        Ok(Some((candidate.ip, candidate.params.len(), function_id)))
+        Ok(Some((candidate.ip, candidate.params.len(), upvalue_count, function_id)))
     }
 
     fn compile_function(
@@ -1181,21 +1201,82 @@ fn is_identity_function(params: &[String], body: &[Statement]) -> bool {
     )
 }
 
-fn collect_function_declarations(statements: &[Statement]) -> HashMap<&str, (&[DestructuringElement], &[Statement])> {
+fn collect_function_bodies(statements: &[Statement]) -> HashMap<&str, (&[DestructuringElement], &[Statement])> {
     let mut declarations = HashMap::new();
-    for statement in statements {
-        let declaration = match &*statement.kind {
-            StatementKind::FunctionDeclaration(name, params, body, false, false) => Some((name, params, body)),
-            StatementKind::Export(_, Some(inner), _) => match &*inner.kind {
-                StatementKind::FunctionDeclaration(name, params, body, false, false) => Some((name, params, body)),
-                _ => None,
-            },
-            _ => None,
-        };
-        if let Some((name, params, body)) = declaration {
-            declarations.insert(name.as_str(), (params.as_slice(), body.as_slice()));
+    fn collect<'a>(statements: &'a [Statement], declarations: &mut HashMap<&'a str, (&'a [DestructuringElement], &'a [Statement])>) {
+        for statement in statements {
+            match &*statement.kind {
+                StatementKind::FunctionDeclaration(name, params, body, false, false) => {
+                    declarations.insert(name.as_str(), (params.as_slice(), body.as_slice()));
+                    collect(body, declarations);
+                }
+                StatementKind::Export(_, Some(inner), _) => collect(std::slice::from_ref(inner), declarations),
+                StatementKind::Const(bindings) => {
+                    for (name, initializer) in bindings {
+                        let (params, body) = match initializer {
+                            Expr::Function(_, params, body, _) | Expr::ArrowFunction(params, body) => (params, body),
+                            _ => continue,
+                        };
+                        declarations.insert(name.as_str(), (params.as_slice(), body.as_slice()));
+                        collect(body, declarations);
+                    }
+                }
+                StatementKind::Let(bindings) | StatementKind::Var(bindings) => {
+                    for (name, initializer) in bindings {
+                        let Some(initializer) = initializer else {
+                            continue;
+                        };
+                        let (params, body) = match initializer {
+                            Expr::Function(_, params, body, _) | Expr::ArrowFunction(params, body) => (params, body),
+                            _ => continue,
+                        };
+                        declarations.insert(name.as_str(), (params.as_slice(), body.as_slice()));
+                        collect(body, declarations);
+                    }
+                }
+                StatementKind::Block(body) | StatementKind::While(_, body) | StatementKind::DoWhile(body, _) => {
+                    collect(body, declarations);
+                }
+                StatementKind::If(branch) => {
+                    collect(&branch.then_body, declarations);
+                    if let Some(else_body) = &branch.else_body {
+                        collect(else_body, declarations);
+                    }
+                }
+                StatementKind::TryCatch(try_catch) => {
+                    collect(&try_catch.try_body, declarations);
+                    if let Some(catch_body) = &try_catch.catch_body {
+                        collect(catch_body, declarations);
+                    }
+                    if let Some(finally_body) = &try_catch.finally_body {
+                        collect(finally_body, declarations);
+                    }
+                }
+                StatementKind::For(for_statement) => {
+                    if let Some(initializer) = &for_statement.init {
+                        collect(std::slice::from_ref(initializer), declarations);
+                    }
+                    collect(&for_statement.body, declarations);
+                }
+                StatementKind::ForOf(_, _, _, body)
+                | StatementKind::ForOfExpr(_, _, body)
+                | StatementKind::ForAwaitOf(_, _, _, body)
+                | StatementKind::ForAwaitOfExpr(_, _, body)
+                | StatementKind::ForIn(_, _, _, body)
+                | StatementKind::ForInExpr(_, _, body)
+                | StatementKind::ForInDestructuringObject(_, _, _, body)
+                | StatementKind::ForInDestructuringArray(_, _, _, body)
+                | StatementKind::ForOfDestructuringObject(_, _, _, body)
+                | StatementKind::ForOfDestructuringArray(_, _, _, body)
+                | StatementKind::ForAwaitOfDestructuringObject(_, _, _, body)
+                | StatementKind::ForAwaitOfDestructuringArray(_, _, _, body)
+                | StatementKind::With(_, body) => collect(body, declarations),
+                StatementKind::Label(_, body) => collect(std::slice::from_ref(body), declarations),
+                _ => {}
+            }
         }
     }
+    collect(statements, &mut declarations);
     declarations
 }
 
@@ -2212,9 +2293,10 @@ mod tests {
             dependencies: Vec::new(),
         };
         let mut engine = JitEngine::new().unwrap();
-        let (ip, arity, function_id) = engine.compile_bytecode_function(&candidate, &cfg, &chunk).unwrap().unwrap();
+        let (ip, arity, upvalue_count, function_id) = engine.compile_bytecode_function(&candidate, &cfg, &chunk).unwrap().unwrap();
         assert_eq!(ip, 0);
         assert_eq!(arity, 2);
+        assert_eq!(upvalue_count, 0);
 
         engine.module.finalize_definitions().unwrap();
         let address = engine.module.get_finalized_function(function_id);
@@ -2263,9 +2345,10 @@ mod tests {
             dependencies: Vec::new(),
         };
         let mut engine = JitEngine::new().unwrap();
-        let (ip, arity, function_id) = engine.compile_bytecode_function(&candidate, &cfg, &chunk).unwrap().unwrap();
+        let (ip, arity, upvalue_count, function_id) = engine.compile_bytecode_function(&candidate, &cfg, &chunk).unwrap().unwrap();
         assert_eq!(ip, 0);
         assert_eq!(arity, 1);
+        assert_eq!(upvalue_count, 0);
 
         engine.module.finalize_definitions().unwrap();
         let address = engine.module.get_finalized_function(function_id);

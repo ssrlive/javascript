@@ -13,6 +13,7 @@ const DIRECT_NATIVE_OPCODES: &[&str] = &[
     "Div",
     "Pop",
     "GetLocal",
+    "GetUpvalue",
     "SetLocal",
     "Negate",
     "Not",
@@ -122,11 +123,16 @@ fn opcode_status(name: &str) -> (&'static str, &'static str) {
         ("native", "numeric results plus opaque tagged identity values")
     } else if name == "GetLocal" {
         ("native", "numeric/boolean locals plus tagged identity passthrough")
+    } else if name == "GetUpvalue" {
+        ("native", "numeric captures loaded through the traced closure-cell ABI")
     } else if DIRECT_NATIVE_OPCODES.contains(&name) {
         ("native", "restricted numeric/boolean bytecode specialization")
     } else if AST_NATIVE_OPCODES.contains(&name) {
         match name {
-            "Call" => ("native", "limited numeric inlining and generic identity ABI dispatch"),
+            "Call" => (
+                "native",
+                "limited numeric inlining, generic identity ABI dispatch, and numeric-capture closure calls",
+            ),
             _ => ("native", "AST-only virtual scalar array/object subset"),
         }
     } else if INFRASTRUCTURE_OPCODES.contains(&name) {

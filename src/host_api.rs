@@ -179,6 +179,7 @@ const _: () = assert!(std::mem::offset_of!(JitValue, payload) == 8);
 pub(crate) struct NativeJitRegistration {
     pub(crate) ip: usize,
     pub(crate) arity: usize,
+    pub(crate) upvalue_count: usize,
     pub(crate) function: NativeJitFunction,
     pub(crate) generic_value: bool,
     pub(crate) dependencies: Vec<(String, usize)>,

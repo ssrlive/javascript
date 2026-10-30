@@ -13,6 +13,139 @@ fn jit_required_mode_executes_compiled_functions_on_the_first_call() {
 }
 
 #[test]
+fn jit_required_mode_executes_arrow_closures_without_upvalue_access() {
+    let source = "const addOne = value => value + 1; addOne(41);";
+    let mut interpreter = JsRuntime::new();
+    let expected = interpreter.eval(source).unwrap();
+    let mut runtime = JsRuntime::new();
+    runtime.set_jit_required(true);
+
+    let result = runtime.eval(source).unwrap();
+
+    assert_eq!(result, expected);
+    assert_eq!(result, JsValue::Number(42.0));
+}
+
+#[test]
+fn jit_required_mode_executes_function_expression_closures_without_upvalue_access() {
+    let source = "const double = function(value) { return value * 2; }; double(21);";
+    let mut interpreter = JsRuntime::new();
+    let expected = interpreter.eval(source).unwrap();
+    let mut runtime = JsRuntime::new();
+    runtime.set_jit_required(true);
+
+    let result = runtime.eval(source).unwrap();
+
+    assert_eq!(result, expected);
+    assert_eq!(result, JsValue::Number(42.0));
+}
+
+#[test]
+fn jit_required_mode_executes_generic_arrow_closures_without_upvalue_access() {
+    let source = r#"
+        const identity = value => value;
+        const object = { field: 3 };
+        identity(object) === object;
+    "#;
+    let mut interpreter = JsRuntime::new();
+    let expected = interpreter.eval(source).unwrap();
+    let mut runtime = JsRuntime::new();
+    runtime.set_jit_required(true);
+
+    let result = runtime.eval(source).unwrap();
+
+    assert_eq!(result, expected);
+    assert_eq!(result, JsValue::Boolean(true));
+}
+
+#[test]
+fn jit_required_mode_reads_updated_numeric_closure_upvalues() {
+    let setup = r#"
+        function makeAdder(captured) {
+            const add = function(value) { return value + captured; };
+            captured = captured + 1;
+            return add;
+        }
+        var addCaptured = makeAdder(40);
+    "#;
+    let mut interpreter = JsRuntime::new();
+    interpreter.eval(setup).unwrap();
+    let expected = interpreter.eval("addCaptured(2);").unwrap();
+
+    let mut runtime = JsRuntime::new();
+    runtime.eval(setup).unwrap();
+    runtime.set_jit_required(true);
+    let result = runtime.eval("addCaptured(2);").unwrap();
+
+    assert_eq!(result, expected);
+    assert_eq!(result, JsValue::Number(43.0));
+}
+
+#[test]
+fn jit_warmed_numeric_closure_reads_upvalues() {
+    let setup = r#"
+        function makeAdder(captured) {
+            const add = function(value) { return value + captured; };
+            captured = captured + 1;
+            return add;
+        }
+        var addCaptured = makeAdder(40);
+    "#;
+    let mut interpreter = JsRuntime::new();
+    interpreter.eval(setup).unwrap();
+    let expected = interpreter.eval("addCaptured(2); addCaptured(2);").unwrap();
+
+    let mut runtime = JsRuntime::new();
+    runtime.eval(setup).unwrap();
+    let result = runtime.eval("addCaptured(2); addCaptured(2);").unwrap();
+
+    assert_eq!(result, expected);
+    assert_eq!(result, JsValue::Number(43.0));
+}
+
+#[test]
+fn jit_warmed_closures_fall_back_for_non_numeric_upvalues() {
+    let setup = r#"
+        function makeFormatter(suffix) {
+            const format = function(value) { return value + suffix; };
+            return format;
+        }
+        var format = makeFormatter("!");
+    "#;
+    let mut interpreter = JsRuntime::new();
+    interpreter.eval(setup).unwrap();
+    let expected = interpreter.eval("format('hello'); format('world');").unwrap();
+
+    let mut runtime = JsRuntime::new();
+    runtime.eval(setup).unwrap();
+    let result = runtime.eval("format('hello'); format('world');").unwrap();
+
+    assert_eq!(result, expected);
+    assert_eq!(result, JsValue::String("world!".to_string()));
+}
+
+#[test]
+fn jit_required_mode_rejects_closure_functions_that_read_captured_values() {
+    let mut runtime = JsRuntime::new();
+    runtime
+        .eval(
+            r#"
+            function makeAdder(captured) {
+                const add = function(value) { return value + captured; };
+                return add;
+            }
+            var addCaptured = makeAdder("captured");
+            "#,
+        )
+        .unwrap();
+    runtime.set_jit_required(true);
+
+    let error = runtime.eval("addCaptured(2);").unwrap_err();
+
+    assert!(error.to_string().contains("JIT-required mode"));
+}
+
+#[test]
 fn jit_identity_uses_tagged_values_and_rooted_heap_handles() {
     let source = r#"
         function identity(value) { return value; }

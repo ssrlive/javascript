@@ -22,6 +22,11 @@ enum RunInnerStatus<'gc> {
     Complete(Value<'gc>),
 }
 
+struct NativeJitCallOptions<'a, 'gc> {
+    generic_value: bool,
+    upvalues: &'a [Value<'gc>],
+}
+
 fn native_jit_exception_value<'gc>(exception: crate::host_api::JitValue) -> Result<Value<'gc>, JSError> {
     if exception.flags != 0 {
         return Err(crate::raise_eval_error!("JIT exception has unsupported flags"));
@@ -177,14 +182,16 @@ impl<'gc> VM<'gc> {
         callee_idx: usize,
         arg_count: usize,
         function: crate::host_api::NativeJitFunction,
-        generic_value: bool,
+        options: NativeJitCallOptions<'_, 'gc>,
         jit_required: bool,
     ) -> Result<bool, JSError> {
         let argument_values = self.stack[callee_idx + 1..callee_idx + 1 + arg_count].to_vec();
+        let mut root_values = argument_values.clone();
+        root_values.extend_from_slice(options.upvalues);
         let root_base = self.jit_roots.len();
-        let mut arguments = Vec::with_capacity(arg_count);
-        for (index, value) in argument_values.iter().enumerate() {
-            if !generic_value && !matches!(value, Value::Number(_)) {
+        let mut arguments = Vec::with_capacity(root_values.len());
+        for (index, value) in root_values.iter().enumerate() {
+            if (!options.generic_value || index >= argument_values.len()) && !matches!(value, Value::Number(_)) {
                 return Err(crate::raise_eval_error!("numeric JIT function received a non-numeric argument"));
             }
             let root_index = root_base
@@ -192,7 +199,7 @@ impl<'gc> VM<'gc> {
                 .ok_or_else(|| crate::raise_eval_error!("JIT root index overflow"))?;
             arguments.push(native_jit_value_for_vm(value, root_index)?);
         }
-        self.jit_roots.extend(argument_values.iter().cloned());
+        self.jit_roots.extend(root_values.iter().cloned());
         let outcome = crate::host_api::invoke_native_jit(function, &arguments, root_base);
         let (status, result, exception) = match outcome {
             Ok(outcome) => outcome,
@@ -203,8 +210,8 @@ impl<'gc> VM<'gc> {
         };
         match status {
             crate::host_api::NativeJitStatus::Returned => {
-                let result = if generic_value {
-                    native_jit_value_to_vm(result, &self.jit_roots, root_base, argument_values.len())
+                let result = if options.generic_value {
+                    native_jit_value_to_vm(result, &self.jit_roots, root_base, root_values.len())
                 } else {
                     result
                         .as_number()
@@ -848,22 +855,26 @@ impl<'gc> VM<'gc> {
                             "JIT-required mode cannot execute method or tail call at bytecode offset {target_ip}"
                         )));
                     }
-                    let Some((arity, generic_value, function, dependencies_match)) = self.jit_functions.get(&target_ip).map(|entry| {
-                        (
+                    let Some((arity, upvalue_count, generic_value, function, dependencies_match)) =
+                        self.jit_functions.get(&target_ip).map(|entry| {
+                            (
                             entry.arity,
+                            entry.upvalue_count,
                             entry.generic_value,
                             entry.function,
                             entry.dependencies.iter().all(
                                 |(name, expected_ip)| matches!(self.globals.get(name), Some(Value::Function(ip, _)) if ip == expected_ip),
                             ),
                         )
-                    }) else {
+                        })
+                    else {
                         return Err(crate::raise_eval_error!(format!(
                             "JIT-required mode: function at bytecode offset {target_ip} was not compiled"
                         )));
                     };
                     let argument_values = &self.stack[callee_idx + 1..callee_idx + 1 + arg_count];
                     if arity != arg_count
+                        || upvalue_count != 0
                         || (!generic_value && argument_values.iter().any(|value| !matches!(value, Value::Number(_))))
                         || !dependencies_match
                     {
@@ -871,7 +882,17 @@ impl<'gc> VM<'gc> {
                             "JIT-required mode: function at bytecode offset {target_ip} has unsupported arguments or changed dependencies"
                         )));
                     }
-                    self.execute_native_jit_call(ctx, callee_idx, arg_count, function, generic_value, true)?;
+                    self.execute_native_jit_call(
+                        ctx,
+                        callee_idx,
+                        arg_count,
+                        function,
+                        NativeJitCallOptions {
+                            generic_value,
+                            upvalues: &[],
+                        },
+                        true,
+                    )?;
                     return Ok(OpcodeAction::Continue);
                 }
                 if let Some(&realm_id) = self.fn_realm.get(&target_ip)
@@ -1010,13 +1031,17 @@ impl<'gc> VM<'gc> {
                     let argument_values = &self.stack[callee_idx + 1..callee_idx + 1 + arg_count];
                     let entry = self.jit_functions.get(&target_ip);
                     let generic_value = entry.is_some_and(|entry| entry.generic_value);
+                    let upvalue_count = entry.map_or(0, |entry| entry.upvalue_count);
                     let dependencies_match = entry.is_some_and(|entry| {
                         entry.arity == arg_count
                             && entry.dependencies.iter().all(
                                 |(name, expected_ip)| matches!(self.globals.get(name), Some(Value::Function(ip, _)) if ip == expected_ip),
                             )
                     });
-                    if (generic_value || argument_values.iter().all(|value| matches!(value, Value::Number(_)))) && dependencies_match {
+                    if upvalue_count == 0
+                        && (generic_value || argument_values.iter().all(|value| matches!(value, Value::Number(_))))
+                        && dependencies_match
+                    {
                         let (should_execute, call_count, function) = {
                             let Some(entry) = self.jit_functions.get_mut(&target_ip) else {
                                 unreachable!("JIT entry was found during dependency validation");
@@ -1028,7 +1053,17 @@ impl<'gc> VM<'gc> {
                             if call_count == 2 {
                                 log::debug!("JIT activated for function at bytecode offset {target_ip}");
                             }
-                            if self.execute_native_jit_call(ctx, callee_idx, arg_count, function, generic_value, false)? {
+                            if self.execute_native_jit_call(
+                                ctx,
+                                callee_idx,
+                                arg_count,
+                                function,
+                                NativeJitCallOptions {
+                                    generic_value,
+                                    upvalues: &[],
+                                },
+                                false,
+                            )? {
                                 return Ok(OpcodeAction::Continue);
                             }
                             log::debug!("JIT deoptimized function at bytecode offset {target_ip}");
@@ -1053,9 +1088,109 @@ impl<'gc> VM<'gc> {
             }
             Value::Closure(target_ip, arity, ref upvals) => {
                 if self.jit_required {
-                    return Err(crate::raise_eval_error!(format!(
-                        "JIT-required mode cannot execute closure at bytecode offset {target_ip}"
-                    )));
+                    if is_method || is_tail_call {
+                        return Err(crate::raise_eval_error!(format!(
+                            "JIT-required mode cannot execute method or tail closure at bytecode offset {target_ip}"
+                        )));
+                    }
+                    let Some((registered_arity, upvalue_count, generic_value, function, dependencies_match)) =
+                        self.jit_functions.get(&target_ip).map(|entry| {
+                            (
+                                entry.arity,
+                                entry.upvalue_count,
+                                entry.generic_value,
+                                entry.function,
+                                entry.dependencies.iter().all(
+                                    |(name, expected_ip)| {
+                                        matches!(self.globals.get(name), Some(Value::Function(ip, _)) if ip == expected_ip)
+                                    },
+                                ),
+                            )
+                        })
+                    else {
+                        return Err(crate::raise_eval_error!(format!(
+                            "JIT-required mode: closure at bytecode offset {target_ip} was not compiled"
+                        )));
+                    };
+                    let Some(captured_cells) = upvals.get(..upvalue_count) else {
+                        return Err(crate::raise_eval_error!(format!(
+                            "JIT-required mode: closure at bytecode offset {target_ip} has missing upvalues"
+                        )));
+                    };
+                    let captured_values = captured_cells.iter().map(|cell| cell.borrow().clone()).collect::<Vec<_>>();
+                    let argument_values = &self.stack[callee_idx + 1..callee_idx + 1 + arg_count];
+                    if registered_arity != arg_count
+                        || (!generic_value && argument_values.iter().any(|value| !matches!(value, Value::Number(_))))
+                        || captured_values.iter().any(|value| !matches!(value, Value::Number(_)))
+                        || !dependencies_match
+                    {
+                        return Err(crate::raise_eval_error!(format!(
+                            "JIT-required mode: closure at bytecode offset {target_ip} has unsupported arguments or changed dependencies"
+                        )));
+                    }
+                    self.execute_native_jit_call(
+                        ctx,
+                        callee_idx,
+                        arg_count,
+                        function,
+                        NativeJitCallOptions {
+                            generic_value,
+                            upvalues: &captured_values,
+                        },
+                        true,
+                    )?;
+                    return Ok(OpcodeAction::Continue);
+                }
+                if !is_method
+                    && !is_tail_call
+                    && arg_count == arity as usize
+                    && let Some(entry) = self.jit_functions.get(&target_ip)
+                {
+                    let registered_arity = entry.arity;
+                    let upvalue_count = entry.upvalue_count;
+                    let generic_value = entry.generic_value;
+                    let function = entry.function;
+                    let dependencies_match = entry
+                        .dependencies
+                        .iter()
+                        .all(|(name, expected_ip)| matches!(self.globals.get(name), Some(Value::Function(ip, _)) if ip == expected_ip));
+                    if let Some(captured_cells) = upvals.get(..upvalue_count) {
+                        let captured_values = captured_cells.iter().map(|cell| cell.borrow().clone()).collect::<Vec<_>>();
+                        let argument_values = &self.stack[callee_idx + 1..callee_idx + 1 + arg_count];
+                        if registered_arity == arg_count
+                            && dependencies_match
+                            && captured_values.iter().all(|value| matches!(value, Value::Number(_)))
+                            && (generic_value || argument_values.iter().all(|value| matches!(value, Value::Number(_))))
+                        {
+                            let (should_execute, call_count) = {
+                                let entry = self
+                                    .jit_functions
+                                    .get_mut(&target_ip)
+                                    .expect("JIT entry remained registered during validation");
+                                entry.calls = entry.calls.saturating_add(1);
+                                (entry.calls >= 2, entry.calls)
+                            };
+                            if should_execute {
+                                if call_count == 2 {
+                                    log::debug!("JIT activated for closure at bytecode offset {target_ip}");
+                                }
+                                if self.execute_native_jit_call(
+                                    ctx,
+                                    callee_idx,
+                                    arg_count,
+                                    function,
+                                    NativeJitCallOptions {
+                                        generic_value,
+                                        upvalues: &captured_values,
+                                    },
+                                    false,
+                                )? {
+                                    return Ok(OpcodeAction::Continue);
+                                }
+                                log::debug!("JIT deoptimized closure at bytecode offset {target_ip}");
+                            }
+                        }
+                    }
                 }
                 // Class constructors cannot be called without `new` — check
                 // early so cross-realm dispatch doesn't bypass the guard.

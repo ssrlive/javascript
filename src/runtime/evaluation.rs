@@ -203,6 +203,7 @@ impl JsRuntime {
                         vm.register_jit_function(
                             registration.ip + main_code_offset.unwrap_or(0),
                             registration.arity,
+                            registration.upvalue_count,
                             registration.function,
                             registration.generic_value,
                             registration.dependencies,

@@ -204,6 +204,7 @@ impl JsRuntime {
                             registration.ip + main_code_offset.unwrap_or(0),
                             registration.arity,
                             registration.function,
+                            registration.generic_value,
                             registration.dependencies,
                         );
                     }

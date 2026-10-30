@@ -71,6 +71,14 @@ impl JitValue {
         }
     }
 
+    pub(crate) const fn boolean(value: bool) -> Self {
+        Self {
+            tag: JitValueTag::Boolean as u32,
+            flags: 0,
+            payload: value as u64,
+        }
+    }
+
     pub(crate) const fn undefined() -> Self {
         Self {
             tag: JitValueTag::Undefined as u32,
@@ -79,8 +87,28 @@ impl JitValue {
         }
     }
 
+    pub(crate) const fn null() -> Self {
+        Self {
+            tag: JitValueTag::Null as u32,
+            flags: 0,
+            payload: 0,
+        }
+    }
+
+    pub(crate) const fn rooted(tag: JitValueTag, root_index: u64) -> Self {
+        Self {
+            tag: tag as u32,
+            flags: 0,
+            payload: root_index,
+        }
+    }
+
     pub(crate) fn as_number(self) -> Option<f64> {
         (JitValueTag::try_from(self.tag).ok()? == JitValueTag::Number).then(|| f64::from_bits(self.payload))
+    }
+
+    pub(crate) fn as_boolean(self) -> Option<bool> {
+        (JitValueTag::try_from(self.tag).ok()? == JitValueTag::Boolean).then_some(self.payload != 0)
     }
 }
 
@@ -89,7 +117,9 @@ impl JitValue {
 pub(crate) struct NativeJitFrame {
     pub(crate) arguments: *const JitValue,
     pub(crate) argument_count: usize,
+    /// Absolute index of the first argument root in the VM's traced root vector.
     pub(crate) root_base: usize,
+    /// Number of argument roots retained for the duration of the native call.
     pub(crate) root_count: usize,
     pub(crate) result: JitValue,
     pub(crate) exception: JitValue,
@@ -150,6 +180,7 @@ pub(crate) struct NativeJitRegistration {
     pub(crate) ip: usize,
     pub(crate) arity: usize,
     pub(crate) function: NativeJitFunction,
+    pub(crate) generic_value: bool,
     pub(crate) dependencies: Vec<(String, usize)>,
 }
 

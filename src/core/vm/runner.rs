@@ -22,6 +22,105 @@ enum RunInnerStatus<'gc> {
     Complete(Value<'gc>),
 }
 
+fn native_jit_exception_value<'gc>(exception: crate::host_api::JitValue) -> Result<Value<'gc>, JSError> {
+    if exception.flags != 0 {
+        return Err(crate::raise_eval_error!("JIT exception has unsupported flags"));
+    }
+    match crate::host_api::JitValueTag::try_from(exception.tag) {
+        Ok(crate::host_api::JitValueTag::Number) => exception
+            .as_number()
+            .map(Value::Number)
+            .ok_or_else(|| crate::raise_eval_error!("JIT exception payload is not a number")),
+        Ok(crate::host_api::JitValueTag::Boolean) => exception
+            .as_boolean()
+            .map(Value::Boolean)
+            .ok_or_else(|| crate::raise_eval_error!("JIT exception payload is not a boolean")),
+        _ => Err(crate::raise_eval_error!(format!(
+            "JIT exception tag {} is not supported",
+            exception.tag
+        ))),
+    }
+}
+
+fn native_jit_tag(value: &Value<'_>) -> crate::host_api::JitValueTag {
+    use crate::host_api::JitValueTag;
+    match value {
+        Value::Undefined => JitValueTag::Undefined,
+        Value::Null => JitValueTag::Null,
+        Value::Uninitialized => JitValueTag::Uninitialized,
+        Value::Number(_) => JitValueTag::Number,
+        Value::BigInt(_) => JitValueTag::BigInt,
+        Value::String(_) => JitValueTag::String,
+        Value::Boolean(_) => JitValueTag::Boolean,
+        Value::Function(..) => JitValueTag::Function,
+        Value::Closure(..) => JitValueTag::Closure,
+        Value::Array(_) => JitValueTag::Array,
+        Value::Object(_) => JitValueTag::Object,
+        Value::Symbol(_) => JitValueTag::Symbol,
+        Value::NativeFunction(_) => JitValueTag::NativeFunction,
+        Value::Map(_) => JitValueTag::Map,
+        Value::Set(_) => JitValueTag::Set,
+        Value::Property { .. } => JitValueTag::Property,
+    }
+}
+
+fn native_jit_value_for_vm(value: &Value<'_>, root_index: usize) -> Result<crate::host_api::JitValue, JSError> {
+    use crate::host_api::{JitValue, JitValueTag};
+    Ok(match value {
+        Value::Undefined => JitValue::undefined(),
+        Value::Null => JitValue::null(),
+        Value::Number(number) => JitValue::number(*number),
+        Value::Boolean(boolean) => JitValue::boolean(*boolean),
+        Value::Uninitialized => JitValue::rooted(JitValueTag::Uninitialized, 0),
+        _ => JitValue::rooted(
+            native_jit_tag(value),
+            u64::try_from(root_index).map_err(|_| crate::raise_eval_error!("JIT root index exceeds ABI range"))?,
+        ),
+    })
+}
+
+fn native_jit_value_to_vm<'gc>(
+    encoded: crate::host_api::JitValue,
+    roots: &[Value<'gc>],
+    root_base: usize,
+    root_count: usize,
+) -> Result<Value<'gc>, JSError> {
+    use crate::host_api::JitValueTag;
+    if encoded.flags != 0 {
+        return Err(crate::raise_eval_error!("JIT value has unsupported flags"));
+    }
+    let tag = JitValueTag::try_from(encoded.tag).map_err(|_| crate::raise_eval_error!("JIT value has an invalid tag"))?;
+    match tag {
+        JitValueTag::Undefined => Ok(Value::Undefined),
+        JitValueTag::Null => Ok(Value::Null),
+        JitValueTag::Boolean => encoded
+            .as_boolean()
+            .map(Value::Boolean)
+            .ok_or_else(|| crate::raise_eval_error!("JIT boolean payload is invalid")),
+        JitValueTag::Number => encoded
+            .as_number()
+            .map(Value::Number)
+            .ok_or_else(|| crate::raise_eval_error!("JIT number payload is invalid")),
+        JitValueTag::Uninitialized => Ok(Value::Uninitialized),
+        tag => {
+            let root_index = usize::try_from(encoded.payload).map_err(|_| crate::raise_eval_error!("JIT root index is invalid"))?;
+            let root_end = root_base
+                .checked_add(root_count)
+                .ok_or_else(|| crate::raise_eval_error!("JIT root range overflow"))?;
+            if root_index < root_base || root_index >= root_end {
+                return Err(crate::raise_eval_error!("JIT value references a root outside its call frame"));
+            }
+            let value = roots
+                .get(root_index)
+                .ok_or_else(|| crate::raise_eval_error!("JIT value references a missing root"))?;
+            if native_jit_tag(value) != tag {
+                return Err(crate::raise_eval_error!("JIT value tag does not match its rooted value"));
+            }
+            Ok(value.clone())
+        }
+    }
+}
+
 impl<'gc> VM<'gc> {
     /// Core execution loop of the VM (Fetch-Decode-Execute)
     pub fn run(&mut self, ctx: &GcContext<'gc>) -> Result<Value<'gc>, JSError> {
@@ -70,6 +169,87 @@ impl<'gc> VM<'gc> {
         }
         self.collect_garbage(ctx);
         Ok(result)
+    }
+
+    fn execute_native_jit_call(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        callee_idx: usize,
+        arg_count: usize,
+        function: crate::host_api::NativeJitFunction,
+        generic_value: bool,
+        jit_required: bool,
+    ) -> Result<bool, JSError> {
+        let argument_values = self.stack[callee_idx + 1..callee_idx + 1 + arg_count].to_vec();
+        let root_base = self.jit_roots.len();
+        let mut arguments = Vec::with_capacity(arg_count);
+        for (index, value) in argument_values.iter().enumerate() {
+            if !generic_value && !matches!(value, Value::Number(_)) {
+                return Err(crate::raise_eval_error!("numeric JIT function received a non-numeric argument"));
+            }
+            let root_index = root_base
+                .checked_add(index)
+                .ok_or_else(|| crate::raise_eval_error!("JIT root index overflow"))?;
+            arguments.push(native_jit_value_for_vm(value, root_index)?);
+        }
+        self.jit_roots.extend(argument_values.iter().cloned());
+        let outcome = crate::host_api::invoke_native_jit(function, &arguments, root_base);
+        let (status, result, exception) = match outcome {
+            Ok(outcome) => outcome,
+            Err(status) => {
+                self.jit_roots.truncate(root_base);
+                return Err(crate::raise_eval_error!(format!("JIT returned invalid status {status}")));
+            }
+        };
+        match status {
+            crate::host_api::NativeJitStatus::Returned => {
+                let result = if generic_value {
+                    native_jit_value_to_vm(result, &self.jit_roots, root_base, argument_values.len())
+                } else {
+                    result
+                        .as_number()
+                        .map(Value::Number)
+                        .ok_or_else(|| crate::raise_eval_error!("JIT returned a non-numeric value through the numeric ABI"))
+                };
+                let result = match result {
+                    Ok(result) => result,
+                    Err(error) => {
+                        self.jit_roots.truncate(root_base);
+                        return Err(error);
+                    }
+                };
+                self.stack.truncate(callee_idx);
+                self.stack.push(result);
+                self.jit_roots.truncate(root_base);
+                Ok(true)
+            }
+            crate::host_api::NativeJitStatus::Threw => {
+                let thrown = match native_jit_exception_value(exception) {
+                    Ok(thrown) => thrown,
+                    Err(error) => {
+                        self.jit_roots.truncate(root_base);
+                        return Err(error);
+                    }
+                };
+                self.stack.truncate(callee_idx);
+                let handled = self.handle_throw(ctx, &thrown);
+                self.jit_roots.truncate(root_base);
+                handled?;
+                Ok(true)
+            }
+            crate::host_api::NativeJitStatus::Deopt => {
+                self.jit_roots.truncate(root_base);
+                if jit_required {
+                    Err(crate::raise_eval_error!("JIT-required function requested interpreter fallback"))
+                } else {
+                    Ok(false)
+                }
+            }
+            crate::host_api::NativeJitStatus::Suspended => {
+                self.jit_roots.truncate(root_base);
+                Err(crate::raise_eval_error!("JIT suspension is not implemented"))
+            }
+        }
     }
 
     /// Execute VM until frames drop below `min_depth` or top-level returns
@@ -668,57 +848,30 @@ impl<'gc> VM<'gc> {
                             "JIT-required mode cannot execute method or tail call at bytecode offset {target_ip}"
                         )));
                     }
-                    let Some(entry) = self.jit_functions.get(&target_ip) else {
+                    let Some((arity, generic_value, function, dependencies_match)) = self.jit_functions.get(&target_ip).map(|entry| {
+                        (
+                            entry.arity,
+                            entry.generic_value,
+                            entry.function,
+                            entry.dependencies.iter().all(
+                                |(name, expected_ip)| matches!(self.globals.get(name), Some(Value::Function(ip, _)) if ip == expected_ip),
+                            ),
+                        )
+                    }) else {
                         return Err(crate::raise_eval_error!(format!(
                             "JIT-required mode: function at bytecode offset {target_ip} was not compiled"
                         )));
                     };
                     let argument_values = &self.stack[callee_idx + 1..callee_idx + 1 + arg_count];
-                    if entry.arity != arg_count
-                        || argument_values.iter().any(|value| !matches!(value, Value::Number(_)))
-                        || !entry
-                            .dependencies
-                            .iter()
-                            .all(|(name, expected_ip)| matches!(self.globals.get(name), Some(Value::Function(ip, _)) if ip == expected_ip))
+                    if arity != arg_count
+                        || (!generic_value && argument_values.iter().any(|value| !matches!(value, Value::Number(_))))
+                        || !dependencies_match
                     {
                         return Err(crate::raise_eval_error!(format!(
                             "JIT-required mode: function at bytecode offset {target_ip} has unsupported arguments or changed dependencies"
                         )));
                     }
-                    let entry = self
-                        .jit_functions
-                        .get_mut(&target_ip)
-                        .expect("JIT function registration was checked above");
-                    entry.arguments.clear();
-                    entry.arguments.extend(argument_values.iter().map(|value| match value {
-                        Value::Number(number) => crate::host_api::JitValue::number(*number),
-                        _ => unreachable!("JIT-required arguments were checked as numbers"),
-                    }));
-                    let root_base = self.jit_roots.len();
-                    self.jit_roots.extend(argument_values.iter().cloned());
-                    let outcome = crate::host_api::invoke_native_jit(entry.function, &entry.arguments, root_base);
-                    self.jit_roots.truncate(root_base);
-                    let (status, result, exception) =
-                        outcome.map_err(|status| crate::raise_eval_error!(format!("JIT returned invalid status {status}")))?;
-                    let result = match status {
-                        crate::host_api::NativeJitStatus::Returned => result
-                            .as_number()
-                            .ok_or_else(|| crate::raise_eval_error!("JIT returned a non-numeric value through the numeric ABI"))?,
-                        crate::host_api::NativeJitStatus::Threw => {
-                            return Err(crate::raise_eval_error!(format!(
-                                "JIT exception propagation is not implemented (exception tag {})",
-                                exception.tag
-                            )));
-                        }
-                        crate::host_api::NativeJitStatus::Deopt => {
-                            return Err(crate::raise_eval_error!("JIT-required function requested interpreter fallback"));
-                        }
-                        crate::host_api::NativeJitStatus::Suspended => {
-                            return Err(crate::raise_eval_error!("JIT suspension is not implemented"));
-                        }
-                    };
-                    self.stack.truncate(callee_idx);
-                    self.stack.push(Value::Number(result));
+                    self.execute_native_jit_call(ctx, callee_idx, arg_count, function, generic_value, true)?;
                     return Ok(OpcodeAction::Continue);
                 }
                 if let Some(&realm_id) = self.fn_realm.get(&target_ip)
@@ -855,55 +1008,30 @@ impl<'gc> VM<'gc> {
                 };
                 if !is_method && !is_tail_call && arg_count == arity as usize {
                     let argument_values = &self.stack[callee_idx + 1..callee_idx + 1 + arg_count];
-                    let dependencies_match = self.jit_functions.get(&target_ip).is_some_and(|entry| {
+                    let entry = self.jit_functions.get(&target_ip);
+                    let generic_value = entry.is_some_and(|entry| entry.generic_value);
+                    let dependencies_match = entry.is_some_and(|entry| {
                         entry.arity == arg_count
                             && entry.dependencies.iter().all(
                                 |(name, expected_ip)| matches!(self.globals.get(name), Some(Value::Function(ip, _)) if ip == expected_ip),
                             )
                     });
-                    if argument_values.iter().all(|value| matches!(value, Value::Number(_)))
-                        && dependencies_match
-                        && let Some(entry) = self.jit_functions.get_mut(&target_ip)
-                    {
-                        entry.arguments.clear();
-                        for value in argument_values {
-                            if let Value::Number(number) = value {
-                                entry.arguments.push(crate::host_api::JitValue::number(*number));
-                            }
-                        }
-                        entry.calls = entry.calls.saturating_add(1);
-                        if entry.calls >= 2 {
-                            if entry.calls == 2 {
+                    if (generic_value || argument_values.iter().all(|value| matches!(value, Value::Number(_)))) && dependencies_match {
+                        let (should_execute, call_count, function) = {
+                            let Some(entry) = self.jit_functions.get_mut(&target_ip) else {
+                                unreachable!("JIT entry was found during dependency validation");
+                            };
+                            entry.calls = entry.calls.saturating_add(1);
+                            (entry.calls >= 2, entry.calls, entry.function)
+                        };
+                        if should_execute {
+                            if call_count == 2 {
                                 log::debug!("JIT activated for function at bytecode offset {target_ip}");
                             }
-                            let root_base = self.jit_roots.len();
-                            self.jit_roots.extend(argument_values.iter().cloned());
-                            let outcome = crate::host_api::invoke_native_jit(entry.function, &entry.arguments, root_base);
-                            self.jit_roots.truncate(root_base);
-                            let (status, result, exception) =
-                                outcome.map_err(|status| crate::raise_eval_error!(format!("JIT returned invalid status {status}")))?;
-                            match status {
-                                crate::host_api::NativeJitStatus::Returned => {
-                                    let Some(result) = result.as_number() else {
-                                        return Err(crate::raise_eval_error!("JIT returned a non-numeric value through the numeric ABI"));
-                                    };
-                                    self.stack.truncate(callee_idx);
-                                    self.stack.push(Value::Number(result));
-                                    return Ok(OpcodeAction::Continue);
-                                }
-                                crate::host_api::NativeJitStatus::Deopt => {
-                                    log::debug!("JIT deoptimized function at bytecode offset {target_ip}");
-                                }
-                                crate::host_api::NativeJitStatus::Threw => {
-                                    return Err(crate::raise_eval_error!(format!(
-                                        "JIT exception propagation is not implemented (exception tag {})",
-                                        exception.tag
-                                    )));
-                                }
-                                crate::host_api::NativeJitStatus::Suspended => {
-                                    return Err(crate::raise_eval_error!("JIT suspension is not implemented"));
-                                }
+                            if self.execute_native_jit_call(ctx, callee_idx, arg_count, function, generic_value, false)? {
+                                return Ok(OpcodeAction::Continue);
                             }
+                            log::debug!("JIT deoptimized function at bytecode offset {target_ip}");
                         }
                     }
                 }

@@ -674,8 +674,8 @@ unsafe impl<'gc> Collect<'gc> for SuspendedModuleState<'gc> {
 struct JitFunctionEntry {
     arity: usize,
     calls: u8,
-    arguments: Vec<crate::host_api::JitValue>,
     function: crate::host_api::NativeJitFunction,
+    generic_value: bool,
     dependencies: Vec<(String, usize)>,
 }
 
@@ -3750,6 +3750,7 @@ impl<'gc> VM<'gc> {
                 registration.ip + code_offset,
                 registration.arity,
                 registration.function,
+                registration.generic_value,
                 registration.dependencies,
             );
         }
@@ -3783,6 +3784,7 @@ impl<'gc> VM<'gc> {
         ip: usize,
         arity: usize,
         function: crate::host_api::NativeJitFunction,
+        generic_value: bool,
         dependencies: Vec<(String, usize)>,
     ) {
         self.jit_functions.insert(
@@ -3790,8 +3792,8 @@ impl<'gc> VM<'gc> {
             JitFunctionEntry {
                 arity,
                 calls: 0,
-                arguments: Vec::with_capacity(arity),
                 function,
+                generic_value,
                 dependencies,
             },
         );

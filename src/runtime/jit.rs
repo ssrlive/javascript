@@ -245,17 +245,22 @@ impl JitEngine {
 
         let mut compiled = Vec::new();
         for candidate in candidates {
-            let bytecode_result = self.compile_bytecode_function(&candidate, &cfg, chunk);
-            let compilation = match bytecode_result {
-                Ok(Some(function)) => Ok((function, true)),
-                Ok(None) if is_supported_function(&candidate.params, candidate.body, &inline_functions) => self
-                    .compile_function(&candidate, &inline_functions)
-                    .map(|function| (function, false)),
-                Ok(None) => {
-                    log::debug!("JIT skipped function {}: unsupported bytecode semantics", candidate.name);
-                    continue;
+            let generic_value = is_identity_function(&candidate.params, candidate.body);
+            let compilation = if generic_value {
+                self.compile_identity_function(&candidate).map(|function| (function, true))
+            } else {
+                let bytecode_result = self.compile_bytecode_function(&candidate, &cfg, chunk);
+                match bytecode_result {
+                    Ok(Some(function)) => Ok((function, true)),
+                    Ok(None) if is_supported_function(&candidate.params, candidate.body, &inline_functions) => self
+                        .compile_function(&candidate, &inline_functions)
+                        .map(|function| (function, false)),
+                    Ok(None) => {
+                        log::debug!("JIT skipped function {}: unsupported bytecode semantics", candidate.name);
+                        continue;
+                    }
+                    Err(error) => Err(error),
                 }
-                Err(error) => Err(error),
             };
             match compilation {
                 Ok((function, from_bytecode)) => {
@@ -265,7 +270,7 @@ impl JitEngine {
                         candidate.name,
                         candidate.ip
                     );
-                    compiled.push((function, candidate.dependencies));
+                    compiled.push((function, candidate.dependencies, generic_value));
                 }
                 Err(error) => log::warn!("JIT skipped function {}: {error}", candidate.name),
             }
@@ -278,17 +283,67 @@ impl JitEngine {
 
         compiled
             .into_iter()
-            .map(|((ip, arity, function_id), dependencies)| {
+            .map(|((ip, arity, function_id), dependencies, generic_value)| {
                 let address = self.module.get_finalized_function(function_id);
                 let function = unsafe { std::mem::transmute::<*const u8, NativeJitFunction>(address) };
                 NativeJitRegistration {
                     ip,
                     arity,
                     function,
+                    generic_value,
                     dependencies,
                 }
             })
             .collect()
+    }
+
+    fn compile_identity_function(&mut self, candidate: &FunctionCandidate<'_>) -> Result<(usize, usize, FuncId), String> {
+        let function_name = format!("js_{}_{}", self.next_function_id, candidate.name);
+        self.next_function_id += 1;
+        let pointer_type = self.module.target_config().pointer_type();
+        let mut signature = self.module.make_signature();
+        signature.params.push(AbiParam::new(pointer_type));
+        signature.returns.push(AbiParam::new(types::I32));
+        let function_id = self
+            .module
+            .declare_function(&function_name, Linkage::Local, &signature)
+            .map_err(|error| error.to_string())?;
+        let mut context = self.module.make_context();
+        context.func = ClifFunction::with_name_signature(UserFuncName::user(0, function_id.as_u32()), signature);
+        let mut builder_context = FunctionBuilderContext::new();
+        {
+            let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_context);
+            let entry = builder.create_block();
+            builder.switch_to_block(entry);
+            builder.append_block_params_for_function_params(entry);
+            let frame_pointer = builder.block_params(entry)[0];
+            let arguments_pointer = builder.ins().load(
+                pointer_type,
+                MemFlagsData::new(),
+                frame_pointer,
+                std::mem::offset_of!(NativeJitFrame, arguments) as i32,
+            );
+            let result_offset = std::mem::offset_of!(NativeJitFrame, result) as i32;
+            for (ty, value_offset) in [
+                (types::I32, std::mem::offset_of!(NativeJitValue, tag)),
+                (types::I32, std::mem::offset_of!(NativeJitValue, flags)),
+                (types::I64, std::mem::offset_of!(NativeJitValue, payload)),
+            ] {
+                let value = builder.ins().load(ty, MemFlagsData::new(), arguments_pointer, value_offset as i32);
+                builder
+                    .ins()
+                    .store(MemFlagsData::new(), value, frame_pointer, result_offset + value_offset as i32);
+            }
+            let returned = builder.ins().iconst(types::I32, NativeJitStatus::Returned as i64);
+            builder.ins().return_(&[returned]);
+            builder.seal_all_blocks();
+            builder.finalize(self.module.target_config());
+        }
+        self.module
+            .define_function(function_id, &mut context)
+            .map_err(|error| error.to_string())?;
+        self.module.clear_context(&mut context);
+        Ok((candidate.ip, candidate.params.len(), function_id))
     }
 
     fn compile_bytecode_function(
@@ -469,6 +524,11 @@ impl JitEngine {
                         }
                         has_return = true;
                     }
+                    Opcode::Throw => {
+                        if !matches!(stack.pop(), Some(BytecodeStackKind::Number | BytecodeStackKind::Boolean)) {
+                            return Ok(None);
+                        }
+                    }
                     _ => return Ok(None),
                 }
             }
@@ -477,6 +537,12 @@ impl JitEngine {
                 return Ok(None);
             };
             if last.opcode == Opcode::Return {
+                if !block.successors.is_empty() {
+                    return Ok(None);
+                }
+                continue;
+            }
+            if last.opcode == Opcode::Throw {
                 if !block.successors.is_empty() {
                     return Ok(None);
                 }
@@ -805,13 +871,41 @@ impl JitEngine {
                             let returned = builder.ins().iconst(types::I32, NativeJitStatus::Returned as i64);
                             builder.ins().return_(&[returned]);
                         }
+                        Opcode::Throw => {
+                            let value = stack.pop().expect("bytecode stack was validated");
+                            let kind = stack_kinds.pop().expect("bytecode stack kinds were validated");
+                            let exception_offset = std::mem::offset_of!(NativeJitFrame, exception) as i32;
+                            let tag = match kind {
+                                BytecodeStackKind::Number => JitValueTag::Number,
+                                BytecodeStackKind::Boolean => JitValueTag::Boolean,
+                            };
+                            let tag = builder.ins().iconst(types::I32, tag as i64);
+                            builder.ins().store(
+                                MemFlagsData::new(),
+                                tag,
+                                frame_pointer,
+                                exception_offset + std::mem::offset_of!(NativeJitValue, tag) as i32,
+                            );
+                            let payload_offset = exception_offset + std::mem::offset_of!(NativeJitValue, payload) as i32;
+                            match kind {
+                                BytecodeStackKind::Number => {
+                                    builder.ins().store(MemFlagsData::new(), value, frame_pointer, payload_offset);
+                                }
+                                BytecodeStackKind::Boolean => {
+                                    let payload = builder.ins().uextend(types::I64, value);
+                                    builder.ins().store(MemFlagsData::new(), payload, frame_pointer, payload_offset);
+                                }
+                            }
+                            let threw = builder.ins().iconst(types::I32, NativeJitStatus::Threw as i64);
+                            builder.ins().return_(&[threw]);
+                        }
                         _ => unreachable!("bytecode instruction set was validated"),
                     }
                 }
                 let last = instructions.last().expect("basic blocks contain instructions");
                 if !matches!(
                     last.opcode,
-                    Opcode::Jump | Opcode::JumpIfFalse | Opcode::JumpIfTrue | Opcode::Return
+                    Opcode::Jump | Opcode::JumpIfFalse | Opcode::JumpIfTrue | Opcode::Return | Opcode::Throw
                 ) {
                     let target = bytecode_block.successors[0];
                     let arguments = stack.iter().copied().map(BlockArg::Value).collect::<Vec<_>>();
@@ -925,6 +1019,19 @@ impl JitEngine {
 
         Ok((candidate.ip, candidate.params.len(), function_id))
     }
+}
+
+fn is_identity_function(params: &[String], body: &[Statement]) -> bool {
+    let [parameter] = params else {
+        return false;
+    };
+    let [statement] = body else {
+        return false;
+    };
+    matches!(
+        &*statement.kind,
+        StatementKind::Return(Some(Expr::Var(name, ..))) if name == parameter
+    )
 }
 
 fn collect_function_declarations(statements: &[Statement]) -> HashMap<&str, (&[DestructuringElement], &[Statement])> {

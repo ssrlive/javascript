@@ -13,6 +13,50 @@ fn jit_required_mode_executes_compiled_functions_on_the_first_call() {
 }
 
 #[test]
+fn jit_identity_uses_tagged_values_and_rooted_heap_handles() {
+    let source = r#"
+        function identity(value) { return value; }
+        const object = { field: 3 };
+        const array = [object];
+        const text = "rooted";
+        (identity(object) === object ? 1 : 0) +
+        (identity(array) === array ? 2 : 0) +
+        (identity(text) === text ? 4 : 0) +
+        (identity(4n) === 4n ? 8 : 0) +
+        (identity(identity) === identity ? 16 : 0) +
+        (identity(null) === null ? 32 : 0) +
+        (identity(undefined) === undefined ? 64 : 0);
+    "#;
+    let mut interpreter = JsRuntime::new();
+    let expected = interpreter.eval(source).unwrap();
+    let mut runtime = JsRuntime::new();
+    runtime.set_jit_required(true);
+
+    let result = runtime.eval(source).unwrap();
+
+    assert_eq!(result, expected);
+    assert_eq!(result, JsValue::Number(127.0));
+}
+
+#[test]
+fn jit_warmed_identity_preserves_rooted_objects() {
+    let mut runtime = JsRuntime::new();
+
+    let result = runtime
+        .eval(
+            r#"
+            function identity(value) { return value; }
+            const object = { field: 3 };
+            identity(object);
+            identity(object) === object;
+            "#,
+        )
+        .unwrap();
+
+    assert_eq!(result, JsValue::Boolean(true));
+}
+
+#[test]
 fn jit_required_mode_executes_numeric_comparison_branches() {
     let mut runtime = JsRuntime::new();
     runtime.set_jit_required(true);
@@ -179,6 +223,56 @@ fn jit_compiles_functions_in_chunks_with_try_catch_and_finally() {
         .unwrap();
 
     assert_eq!(result, JsValue::Number(44.0));
+}
+
+#[test]
+fn jit_native_throw_reaches_interpreted_catch() {
+    let source = r#"
+        function guard(value) {
+            if (value < 0) throw true;
+            return value + 1;
+        }
+        let caughtValue = false;
+        try {
+            guard(-1);
+        } catch (error) {
+            caughtValue = error;
+        }
+        guard(4) + (caughtValue ? 10 : 0);
+    "#;
+    let mut interpreter = JsRuntime::new();
+    let expected = interpreter.eval(source).unwrap();
+    let mut runtime = JsRuntime::new();
+    runtime.set_jit_required(true);
+
+    let result = runtime.eval(source).unwrap();
+
+    assert_eq!(result, expected);
+    assert_eq!(result, JsValue::Number(15.0));
+}
+
+#[test]
+fn jit_required_mode_rejects_handlers_inside_compiled_functions() {
+    let mut runtime = JsRuntime::new();
+    runtime.set_jit_required(true);
+
+    let error = runtime
+        .eval(
+            r#"
+            function catchesLocally() {
+                try {
+                    throw 1;
+                } catch (error) {
+                    return error;
+                }
+                return 0;
+            }
+            catchesLocally();
+            "#,
+        )
+        .unwrap_err();
+
+    assert!(error.to_string().contains("JIT-required mode"));
 }
 
 #[test]

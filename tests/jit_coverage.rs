@@ -33,6 +33,7 @@ const DIRECT_NATIVE_OPCODES: &[&str] = &[
     "Swap",
     "Increment",
     "Decrement",
+    "Throw",
 ];
 const INFRASTRUCTURE_OPCODES: &[&str] = &[
     "Mod",
@@ -108,11 +109,20 @@ fn report_opcode_and_builtin_jit_coverage_by_semantic_family() {
 fn opcode_status(name: &str) -> (&'static str, &'static str) {
     if name == "BoxLocal" {
         ("native", "elided for verified closure-free scalar locals")
+    } else if name == "Throw" {
+        (
+            "native",
+            "Number/Boolean throws propagate to VM handlers; in-function handlers are not lowered",
+        )
+    } else if name == "Return" {
+        ("native", "numeric results plus opaque tagged identity values")
+    } else if name == "GetLocal" {
+        ("native", "numeric/boolean locals plus tagged identity passthrough")
     } else if DIRECT_NATIVE_OPCODES.contains(&name) {
         ("native", "restricted numeric/boolean bytecode specialization")
     } else if AST_NATIVE_OPCODES.contains(&name) {
         match name {
-            "Call" => ("native", "limited statically-known numeric AST inlining"),
+            "Call" => ("native", "limited numeric inlining and generic identity ABI dispatch"),
             _ => ("native", "AST-only virtual scalar array/object subset"),
         }
     } else if INFRASTRUCTURE_OPCODES.contains(&name) {

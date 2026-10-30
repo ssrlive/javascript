@@ -375,3 +375,46 @@ fn jit_required_mode_executes_statically_inlined_numeric_helpers() {
     assert_eq!(result, expected);
     assert_eq!(result, JsValue::Number(78.0));
 }
+
+#[test]
+fn jit_required_mode_inlines_power_helpers() {
+    let source = r#"
+        function power(base, exponent) {
+            return base ** exponent;
+        }
+        function combine(value) {
+            return power(value, 3) + power(value + 1, 2);
+        }
+        combine(2) + combine(-2) + power(0.5, 2);
+    "#;
+    let mut interpreter = JsRuntime::new();
+    let expected = interpreter.eval(source).unwrap();
+    let mut runtime = JsRuntime::new();
+    runtime.set_jit_required(true);
+
+    let result = runtime.eval(source).unwrap();
+
+    assert_eq!(result, expected);
+    assert_eq!(result, JsValue::Number(10.25));
+}
+
+#[test]
+fn jit_required_mode_inlines_bitwise_helpers() {
+    let source = r#"
+        function mask(value, shift) {
+            return ((value >>> shift) & 255) ^ (~value);
+        }
+        function combine(value) {
+            return mask(value, 3) + mask(value + 1, 2);
+        }
+        combine(-1) + combine(4294967297) + mask(NaN, 1);
+    "#;
+    let mut interpreter = JsRuntime::new();
+    let expected = interpreter.eval(source).unwrap();
+    let mut runtime = JsRuntime::new();
+    runtime.set_jit_required(true);
+
+    let result = runtime.eval(source).unwrap();
+
+    assert_eq!(result, expected);
+}

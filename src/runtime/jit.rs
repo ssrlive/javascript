@@ -850,6 +850,9 @@ impl JitEngine {
         let mut context = self.module.make_context();
         context.func = ClifFunction::with_name_signature(UserFuncName::user(0, function_id.as_u32()), signature);
         let fmod_function = self.module.declare_func_in_func(self.fmod_function, &mut context.func);
+        let pow_function = self.module.declare_func_in_func(self.pow_function, &mut context.func);
+        let bitwise_function = self.module.declare_func_in_func(self.bitwise_function, &mut context.func);
+        let bitwise_not_function = self.module.declare_func_in_func(self.bitwise_not_function, &mut context.func);
         let mut builder_context = FunctionBuilderContext::new();
         {
             let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_context);
@@ -868,6 +871,9 @@ impl JitEngine {
                 builder: &mut builder,
                 locals: HashMap::new(),
                 fmod_function,
+                pow_function,
+                bitwise_function,
+                bitwise_not_function,
                 inline_functions: inline_functions.clone(),
             };
             for (index, name) in candidate.params.iter().enumerate() {
@@ -984,12 +990,27 @@ fn supports_inline_numeric_expression(expression: &Expr, analysis: &JitAnalysis)
         Expr::Number(_) => true,
         Expr::Var(name, ..) => analysis.is_number(name),
         Expr::Binary(left, op, right) => {
-            matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod)
-                && supports_inline_numeric_expression(left, analysis)
+            matches!(
+                op,
+                BinaryOp::Add
+                    | BinaryOp::Sub
+                    | BinaryOp::Mul
+                    | BinaryOp::Div
+                    | BinaryOp::Mod
+                    | BinaryOp::Pow
+                    | BinaryOp::BitAnd
+                    | BinaryOp::BitOr
+                    | BinaryOp::BitXor
+                    | BinaryOp::LeftShift
+                    | BinaryOp::RightShift
+                    | BinaryOp::UnsignedRightShift
+            ) && supports_inline_numeric_expression(left, analysis)
                 && supports_inline_numeric_expression(right, analysis)
         }
-        Expr::Mod(left, right) => supports_inline_numeric_expression(left, analysis) && supports_inline_numeric_expression(right, analysis),
-        Expr::UnaryNeg(inner) | Expr::UnaryPlus(inner) => supports_inline_numeric_expression(inner, analysis),
+        Expr::Mod(left, right) | Expr::Pow(left, right) => {
+            supports_inline_numeric_expression(left, analysis) && supports_inline_numeric_expression(right, analysis)
+        }
+        Expr::UnaryNeg(inner) | Expr::UnaryPlus(inner) | Expr::BitNot(inner) => supports_inline_numeric_expression(inner, analysis),
         _ => false,
     }
 }
@@ -1068,6 +1089,7 @@ fn collect_inline_dependencies_from_expression(
         Expr::Assign(left, right)
         | Expr::Binary(left, _, right)
         | Expr::Mod(left, right)
+        | Expr::Pow(left, right)
         | Expr::AddAssign(left, right)
         | Expr::SubAssign(left, right)
         | Expr::MulAssign(left, right)
@@ -1418,6 +1440,7 @@ fn supports_expression(expression: &Expr, analysis: &JitAnalysis) -> bool {
                     | BinaryOp::Mul
                     | BinaryOp::Div
                     | BinaryOp::Mod
+                    | BinaryOp::Pow
                     | BinaryOp::LessThan
                     | BinaryOp::GreaterThan
                     | BinaryOp::LessEqual
@@ -1426,11 +1449,17 @@ fn supports_expression(expression: &Expr, analysis: &JitAnalysis) -> bool {
                     | BinaryOp::StrictEqual
                     | BinaryOp::NotEqual
                     | BinaryOp::StrictNotEqual
+                    | BinaryOp::BitAnd
+                    | BinaryOp::BitOr
+                    | BinaryOp::BitXor
+                    | BinaryOp::LeftShift
+                    | BinaryOp::RightShift
+                    | BinaryOp::UnsignedRightShift
             ) && supports_expression(left, analysis)
                 && supports_expression(right, analysis)
         }
-        Expr::Mod(left, right) => supports_expression(left, analysis) && supports_expression(right, analysis),
-        Expr::UnaryNeg(inner) | Expr::UnaryPlus(inner) => supports_expression(inner, analysis),
+        Expr::Mod(left, right) | Expr::Pow(left, right) => supports_expression(left, analysis) && supports_expression(right, analysis),
+        Expr::UnaryNeg(inner) | Expr::UnaryPlus(inner) | Expr::BitNot(inner) => supports_expression(inner, analysis),
         Expr::Assign(left, right) => supports_lvalue(left, analysis) && supports_expression(right, analysis),
         Expr::AddAssign(left, right)
         | Expr::SubAssign(left, right)
@@ -1484,6 +1513,9 @@ struct FunctionCompiler<'a, 'b> {
     builder: &'a mut FunctionBuilder<'b>,
     locals: HashMap<String, JitLocal>,
     fmod_function: FuncRef,
+    pow_function: FuncRef,
+    bitwise_function: FuncRef,
+    bitwise_not_function: FuncRef,
     inline_functions: HashMap<String, InlineFunction>,
 }
 
@@ -1773,6 +1805,29 @@ impl FunctionCompiler<'_, '_> {
                         let call = self.builder.ins().call(self.fmod_function, &[left, right]);
                         JitValue::Number(self.builder.inst_results(call)[0])
                     }
+                    BinaryOp::Pow => {
+                        let call = self.builder.ins().call(self.pow_function, &[left, right]);
+                        JitValue::Number(self.builder.inst_results(call)[0])
+                    }
+                    BinaryOp::BitAnd
+                    | BinaryOp::BitOr
+                    | BinaryOp::BitXor
+                    | BinaryOp::LeftShift
+                    | BinaryOp::RightShift
+                    | BinaryOp::UnsignedRightShift => {
+                        let operation = match op {
+                            BinaryOp::BitAnd => 0,
+                            BinaryOp::BitOr => 1,
+                            BinaryOp::BitXor => 2,
+                            BinaryOp::LeftShift => 3,
+                            BinaryOp::RightShift => 4,
+                            BinaryOp::UnsignedRightShift => 5,
+                            _ => unreachable!("matched bitwise binary operator"),
+                        };
+                        let operation = self.builder.ins().iconst(types::I32, operation);
+                        let call = self.builder.ins().call(self.bitwise_function, &[left, right, operation]);
+                        JitValue::Number(self.builder.inst_results(call)[0])
+                    }
                     BinaryOp::LessThan => JitValue::Boolean(self.builder.ins().fcmp(FloatCC::LessThan, left, right)),
                     BinaryOp::GreaterThan => JitValue::Boolean(self.builder.ins().fcmp(FloatCC::GreaterThan, left, right)),
                     BinaryOp::LessEqual => JitValue::Boolean(self.builder.ins().fcmp(FloatCC::LessThanOrEqual, left, right)),
@@ -1795,6 +1850,16 @@ impl FunctionCompiler<'_, '_> {
                 let call = self.builder.ins().call(self.fmod_function, &[left, right]);
                 Ok(JitValue::Number(self.builder.inst_results(call)[0]))
             }
+            Expr::Pow(left, right) => {
+                let JitValue::Number(left) = self.compile_expression(left)? else {
+                    return Err("numeric operands required".to_string());
+                };
+                let JitValue::Number(right) = self.compile_expression(right)? else {
+                    return Err("numeric operands required".to_string());
+                };
+                let call = self.builder.ins().call(self.pow_function, &[left, right]);
+                Ok(JitValue::Number(self.builder.inst_results(call)[0]))
+            }
             Expr::UnaryNeg(inner) => {
                 let JitValue::Number(value) = self.compile_expression(inner)? else {
                     return Err("numeric operand required".to_string());
@@ -1802,6 +1867,13 @@ impl FunctionCompiler<'_, '_> {
                 Ok(JitValue::Number(self.builder.ins().fneg(value)))
             }
             Expr::UnaryPlus(inner) => self.compile_expression(inner),
+            Expr::BitNot(inner) => {
+                let JitValue::Number(value) = self.compile_expression(inner)? else {
+                    return Err("numeric operand required".to_string());
+                };
+                let call = self.builder.ins().call(self.bitwise_not_function, &[value]);
+                Ok(JitValue::Number(self.builder.inst_results(call)[0]))
+            }
             Expr::Assign(left, right) => {
                 let target = self.compile_lvalue(left)?;
                 let JitValue::Number(value) = self.compile_expression(right)? else {

@@ -129,6 +129,40 @@ fn native_jit_value_to_vm<'gc>(
 }
 
 impl<'gc> VM<'gc> {
+    fn jit_host_function_property_matches(&self, object: &str, property: &str, function_name: &str) -> bool {
+        fn host_function_matches(value: &Value<'_>, expected_name: &str) -> bool {
+            match value {
+                Value::Object(function) => matches!(
+                    function.borrow().get("__host_fn__"),
+                    Some(Value::String(name)) if crate::unicode::utf16_to_utf8(name) == expected_name
+                ),
+                Value::Property {
+                    value: Some(value),
+                    getter: None,
+                    ..
+                } => host_function_matches(value, expected_name),
+                _ => false,
+            }
+        }
+
+        let property_value = match object {
+            "Array.prototype" => match self.array_prototype_value() {
+                Some(Value::Array(prototype)) => prototype.borrow().props.get(property).cloned(),
+                Some(Value::Object(prototype)) => prototype.borrow().get(property).cloned(),
+                _ => None,
+            },
+            _ => match self.globals.get(object) {
+                Some(Value::Object(prototype)) => prototype.borrow().get(property).cloned(),
+                Some(Value::Array(prototype)) => prototype.borrow().props.get(property).cloned(),
+                _ => None,
+            },
+        };
+        match property_value {
+            Some(value) => host_function_matches(&value, function_name),
+            None => false,
+        }
+    }
+
     fn jit_dependencies_match(&self, dependencies: &[crate::host_api::JitDependency]) -> bool {
         dependencies.iter().all(|dependency| match dependency {
             crate::host_api::JitDependency::Function { name, ip } => {
@@ -147,12 +181,27 @@ impl<'gc> VM<'gc> {
                             value: Some(actual_value),
                             getter: None,
                             ..
-                        }) => matches!(actual_value.as_ref(), Value::NativeFunction(actual_id) if actual_id == function_id),
+                        }) => match actual_value.as_ref() {
+                            Value::NativeFunction(actual_id) => actual_id == function_id,
+                            Value::Object(native_function) => matches!(
+                                native_function.borrow().get("__native_id__"),
+                                Some(Value::Number(actual_id)) if *actual_id as usize == *function_id
+                            ),
+                            _ => false,
+                        },
+                        Some(Value::Object(native_function)) => {
+                            matches!(native_function.borrow().get("__native_id__"), Some(Value::Number(actual_id)) if *actual_id as usize == *function_id)
+                        }
                         _ => false,
                     }
                 }
                 _ => false,
             },
+            crate::host_api::JitDependency::BuiltinHostFunctionProperty {
+                object,
+                property,
+                function_name,
+            } => self.jit_host_function_property_matches(object, property, function_name),
         })
     }
     /// Core execution loop of the VM (Fetch-Decode-Execute)

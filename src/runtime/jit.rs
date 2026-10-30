@@ -1,9 +1,9 @@
-use crate::core::function_id::BUILTIN_MATH_ABS;
+use crate::core::function_id::*;
 use crate::core::{BinaryOp, Chunk, DestructuringElement, Expr, Opcode, Statement, StatementKind};
 use crate::host_api::JitDependency;
 use crate::host_api::{JitValue as NativeJitValue, JitValueTag, NativeJitFrame, NativeJitFunction, NativeJitRegistration, NativeJitStatus};
 use cranelift_codegen::ir::{
-    AbiParam, BlockArg, FuncRef, Function as ClifFunction, InstBuilder, MemFlagsData, UserFuncName,
+    AbiParam, BlockArg, FuncRef, Function as ClifFunction, InstBuilder, MemFlagsData, StackSlotData, StackSlotKind, UserFuncName,
     condcodes::{FloatCC, IntCC},
     types,
 };
@@ -21,6 +21,7 @@ pub(crate) struct JitEngine {
     pow_function: FuncId,
     bitwise_function: FuncId,
     bitwise_not_function: FuncId,
+    math_builtin_function: FuncId,
     next_function_id: u32,
 }
 
@@ -170,6 +171,130 @@ unsafe extern "C" fn js_bitwise_not(value: f64) -> f64 {
     (!crate::core::vm::to_int32(value)) as f64
 }
 
+unsafe extern "C" fn js_math_builtin(arguments: *const f64, length: usize, id: usize) -> f64 {
+    let arguments = if length == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(arguments, length) }
+    };
+    let first = arguments.first().copied().unwrap_or(f64::NAN);
+    match id {
+        BUILTIN_MATH_FLOOR => first.floor(),
+        BUILTIN_MATH_CEIL => first.ceil(),
+        BUILTIN_MATH_ROUND => {
+            if first.is_nan() || first.is_infinite() || first == 0.0 {
+                first
+            } else if first > 0.0 && first < 0.5 {
+                0.0
+            } else if (-0.5..0.0).contains(&first) {
+                -0.0
+            } else if first - first.trunc() == 0.0 {
+                first
+            } else {
+                (first + 0.5).floor()
+            }
+        }
+        BUILTIN_MATH_ABS => first.abs(),
+        BUILTIN_MATH_SQRT => first.sqrt(),
+        BUILTIN_MATH_SIN => first.sin(),
+        BUILTIN_MATH_COS => first.cos(),
+        BUILTIN_MATH_TAN => first.tan(),
+        BUILTIN_MATH_ASIN => first.asin(),
+        BUILTIN_MATH_ACOS => first.acos(),
+        BUILTIN_MATH_ATAN => first.atan(),
+        BUILTIN_MATH_ATAN2 => first.atan2(arguments.get(1).copied().unwrap_or(f64::NAN)),
+        BUILTIN_MATH_SINH => first.sinh(),
+        BUILTIN_MATH_COSH => first.cosh(),
+        BUILTIN_MATH_TANH => first.tanh(),
+        BUILTIN_MATH_ASINH => first.asinh(),
+        BUILTIN_MATH_ACOSH => first.acosh(),
+        BUILTIN_MATH_ATANH => first.atanh(),
+        BUILTIN_MATH_EXP => first.exp(),
+        BUILTIN_MATH_EXPM1 => first.exp_m1(),
+        BUILTIN_MATH_LOG => first.ln(),
+        BUILTIN_MATH_LOG10 => first.log10(),
+        BUILTIN_MATH_LOG1P => first.ln_1p(),
+        BUILTIN_MATH_LOG2 => first.log2(),
+        BUILTIN_MATH_FROUND => (first as f32) as f64,
+        BUILTIN_MATH_F16ROUND => crate::core::vm::f16round(first),
+        BUILTIN_MATH_CBRT => first.cbrt(),
+        BUILTIN_MATH_TRUNC => first.trunc(),
+        BUILTIN_MATH_SIGN => {
+            if first.is_nan() || first == 0.0 {
+                first
+            } else if first > 0.0 {
+                1.0
+            } else {
+                -1.0
+            }
+        }
+        BUILTIN_MATH_MAX => {
+            let mut result = f64::NEG_INFINITY;
+            for &value in arguments {
+                if value.is_nan() {
+                    return f64::NAN;
+                }
+                if value > result || (value == 0.0 && result == 0.0 && result.is_sign_negative() && !value.is_sign_negative()) {
+                    result = value;
+                }
+            }
+            result
+        }
+        BUILTIN_MATH_MIN => {
+            let mut result = f64::INFINITY;
+            for &value in arguments {
+                if value.is_nan() {
+                    return f64::NAN;
+                }
+                if value < result || (value == 0.0 && result == 0.0 && !result.is_sign_negative() && value.is_sign_negative()) {
+                    result = value;
+                }
+            }
+            result
+        }
+        BUILTIN_MATH_HYPOT => {
+            if arguments.iter().any(|value| value.is_infinite()) {
+                return f64::INFINITY;
+            }
+            if arguments.iter().any(|value| value.is_nan()) {
+                return f64::NAN;
+            }
+            arguments.iter().map(|value| value * value).sum::<f64>().sqrt()
+        }
+        BUILTIN_MATH_POW => {
+            let exponent = arguments.get(1).copied().unwrap_or(f64::NAN);
+            if exponent == 0.0 {
+                1.0
+            } else if first.is_nan() || exponent.is_nan() || (first.abs() == 1.0 && exponent.is_infinite()) {
+                f64::NAN
+            } else {
+                first.powf(exponent)
+            }
+        }
+        BUILTIN_MATH_CLZ32 => arguments
+            .first()
+            .map(|value| crate::core::vm::to_uint32(*value).leading_zeros() as f64)
+            .unwrap_or(32.0),
+        BUILTIN_MATH_IMUL => {
+            let left = arguments.first().map(|value| crate::core::vm::to_int32(*value)).unwrap_or(0);
+            let right = arguments.get(1).map(|value| crate::core::vm::to_int32(*value)).unwrap_or(0);
+            left.wrapping_mul(right) as f64
+        }
+        BUILTIN_MATH_SUMPRECISE => crate::core::vm::math_sum_precise_numbers(arguments.to_vec()),
+        BUILTIN_MATH_RANDOM => {
+            use std::time::SystemTime;
+            let seed = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos() as u64)
+                .unwrap_or(0);
+            let mixed = seed ^ (seed >> 17) ^ (seed << 13);
+            let bits53 = mixed & ((1u64 << 53) - 1);
+            (bits53 as f64) / ((1u64 << 53) as f64)
+        }
+        _ => f64::NAN,
+    }
+}
+
 impl JitEngine {
     pub(crate) fn new() -> Result<Self, String> {
         if !cfg!(all(
@@ -196,7 +321,9 @@ impl JitEngine {
         builder.symbol("javascript_jit_pow", js_pow as *const u8);
         builder.symbol("javascript_jit_bitwise", js_bitwise_binary as *const u8);
         builder.symbol("javascript_jit_bitwise_not", js_bitwise_not as *const u8);
+        builder.symbol("javascript_jit_math_builtin", js_math_builtin as *const u8);
         let mut module = JITModule::new(builder);
+        let pointer_type = module.target_config().pointer_type();
         let mut numeric_binary_signature = module.make_signature();
         numeric_binary_signature.params.push(AbiParam::new(types::F64));
         numeric_binary_signature.params.push(AbiParam::new(types::F64));
@@ -221,6 +348,14 @@ impl JitEngine {
         let bitwise_not_function = module
             .declare_function("javascript_jit_bitwise_not", Linkage::Import, &bitwise_not_signature)
             .map_err(|error| error.to_string())?;
+        let mut math_builtin_signature = module.make_signature();
+        math_builtin_signature.params.push(AbiParam::new(pointer_type));
+        math_builtin_signature.params.push(AbiParam::new(pointer_type));
+        math_builtin_signature.params.push(AbiParam::new(types::I32));
+        math_builtin_signature.returns.push(AbiParam::new(types::F64));
+        let math_builtin_function = module
+            .declare_function("javascript_jit_math_builtin", Linkage::Import, &math_builtin_signature)
+            .map_err(|error| error.to_string())?;
 
         Ok(Self {
             module,
@@ -228,6 +363,7 @@ impl JitEngine {
             pow_function,
             bitwise_function,
             bitwise_not_function,
+            math_builtin_function,
             next_function_id: 0,
         })
     }
@@ -274,7 +410,7 @@ impl JitEngine {
                 collect_inline_dependencies_from_statement(statement, &inline_functions, &mut dependency_names);
             }
             let mut pending_dependencies = dependency_names.iter().cloned().collect::<Vec<_>>();
-            let mut builtin_dependencies = HashSet::new();
+            let mut builtin_dependencies = HashSet::<(String, usize)>::new();
             for statement in *body {
                 collect_builtin_dependencies_from_statement(statement, &mut builtin_dependencies);
             }
@@ -300,11 +436,25 @@ impl JitEngine {
                     })
                 })
                 .collect::<Vec<_>>();
-            dependencies.extend(builtin_dependencies.into_iter().map(|property| JitDependency::BuiltinProperty {
-                object: "Math".to_string(),
-                property,
-                function_id: BUILTIN_MATH_ABS,
-            }));
+            for (property, function_id) in builtin_dependencies {
+                dependencies.push(JitDependency::BuiltinProperty {
+                    object: "Math".to_string(),
+                    property,
+                    function_id,
+                });
+                if function_id == BUILTIN_MATH_SUMPRECISE {
+                    dependencies.push(JitDependency::BuiltinHostFunctionProperty {
+                        object: "Array.prototype".to_string(),
+                        property: "@@sym:1".to_string(),
+                        function_name: "array.values".to_string(),
+                    });
+                    dependencies.push(JitDependency::BuiltinHostFunctionProperty {
+                        object: "__ArrayIteratorPrototype__".to_string(),
+                        property: "next".to_string(),
+                        function_name: "iterator.next".to_string(),
+                    });
+                }
+            }
             candidates.push(FunctionCandidate {
                 ip: *ip,
                 name: name.clone(),
@@ -1324,6 +1474,7 @@ impl JitEngine {
         let pow_function = self.module.declare_func_in_func(self.pow_function, &mut context.func);
         let bitwise_function = self.module.declare_func_in_func(self.bitwise_function, &mut context.func);
         let bitwise_not_function = self.module.declare_func_in_func(self.bitwise_not_function, &mut context.func);
+        let math_builtin_function = self.module.declare_func_in_func(self.math_builtin_function, &mut context.func);
         let mut builder_context = FunctionBuilderContext::new();
         {
             let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_context);
@@ -1345,6 +1496,8 @@ impl JitEngine {
                 pow_function,
                 bitwise_function,
                 bitwise_not_function,
+                math_builtin_function,
+                pointer_type,
                 inline_functions: inline_functions.clone(),
             };
             for (index, name) in candidate.params.iter().enumerate() {
@@ -1534,9 +1687,10 @@ fn supports_inline_numeric_expression(expression: &Expr, analysis: &JitAnalysis)
     match expression {
         Expr::Number(_) => true,
         Expr::Var(name, ..) => analysis.is_number(name),
-        Expr::Call(callee, arguments) if is_math_abs_call(callee) => {
-            !analysis.locals.contains("Math")
-                && arguments.len() == 1
+        Expr::Call(callee, arguments) if let Some((_, id)) = math_numeric_builtin_call(callee) => {
+            id != BUILTIN_MATH_SUMPRECISE
+                && !analysis.locals.contains("Math")
+                && math_builtin_arity_supported(id, arguments.len())
                 && arguments
                     .iter()
                     .all(|argument| supports_inline_numeric_expression(argument, analysis))
@@ -1622,7 +1776,7 @@ fn collect_inline_dependencies_from_statement(
     }
 }
 
-fn collect_builtin_dependencies_from_statement(statement: &Statement, dependencies: &mut HashSet<String>) {
+fn collect_builtin_dependencies_from_statement(statement: &Statement, dependencies: &mut HashSet<(String, usize)>) {
     match &*statement.kind {
         StatementKind::Let(declarations) | StatementKind::Var(declarations) => {
             for (_, initializer) in declarations {
@@ -1674,11 +1828,11 @@ fn collect_builtin_dependencies_from_statement(statement: &Statement, dependenci
     }
 }
 
-fn collect_builtin_dependencies_from_expression(expression: &Expr, dependencies: &mut HashSet<String>) {
+fn collect_builtin_dependencies_from_expression(expression: &Expr, dependencies: &mut HashSet<(String, usize)>) {
     match expression {
         Expr::Call(callee, arguments) => {
-            if is_math_abs_call(callee) {
-                dependencies.insert("abs".to_string());
+            if let Some((property, function_id)) = math_numeric_builtin_call(callee) {
+                dependencies.insert((property.to_string(), function_id));
             }
             collect_builtin_dependencies_from_expression(callee, dependencies);
             for argument in arguments {
@@ -1806,8 +1960,80 @@ fn collect_inline_dependencies_from_expression(
     }
 }
 
-fn is_math_abs_call(callee: &Expr) -> bool {
-    matches!(callee, Expr::Property(base, property) if property == "abs" && matches!(&**base, Expr::Var(name, ..) if name == "Math"))
+fn math_numeric_builtin_call(callee: &Expr) -> Option<(&'static str, usize)> {
+    let Expr::Property(base, property) = callee else {
+        return None;
+    };
+    if !matches!(&**base, Expr::Var(name, ..) if name == "Math") {
+        return None;
+    }
+    match property.as_str() {
+        "abs" => Some(("abs", BUILTIN_MATH_ABS)),
+        "ceil" => Some(("ceil", BUILTIN_MATH_CEIL)),
+        "floor" => Some(("floor", BUILTIN_MATH_FLOOR)),
+        "max" => Some(("max", BUILTIN_MATH_MAX)),
+        "min" => Some(("min", BUILTIN_MATH_MIN)),
+        "sin" => Some(("sin", BUILTIN_MATH_SIN)),
+        "cos" => Some(("cos", BUILTIN_MATH_COS)),
+        "tan" => Some(("tan", BUILTIN_MATH_TAN)),
+        "asin" => Some(("asin", BUILTIN_MATH_ASIN)),
+        "acos" => Some(("acos", BUILTIN_MATH_ACOS)),
+        "atan" => Some(("atan", BUILTIN_MATH_ATAN)),
+        "atan2" => Some(("atan2", BUILTIN_MATH_ATAN2)),
+        "sinh" => Some(("sinh", BUILTIN_MATH_SINH)),
+        "cosh" => Some(("cosh", BUILTIN_MATH_COSH)),
+        "tanh" => Some(("tanh", BUILTIN_MATH_TANH)),
+        "asinh" => Some(("asinh", BUILTIN_MATH_ASINH)),
+        "acosh" => Some(("acosh", BUILTIN_MATH_ACOSH)),
+        "atanh" => Some(("atanh", BUILTIN_MATH_ATANH)),
+        "exp" => Some(("exp", BUILTIN_MATH_EXP)),
+        "expm1" => Some(("expm1", BUILTIN_MATH_EXPM1)),
+        "log" => Some(("log", BUILTIN_MATH_LOG)),
+        "log10" => Some(("log10", BUILTIN_MATH_LOG10)),
+        "log1p" => Some(("log1p", BUILTIN_MATH_LOG1P)),
+        "log2" => Some(("log2", BUILTIN_MATH_LOG2)),
+        "fround" => Some(("fround", BUILTIN_MATH_FROUND)),
+        "f16round" => Some(("f16round", BUILTIN_MATH_F16ROUND)),
+        "round" => Some(("round", BUILTIN_MATH_ROUND)),
+        "sign" => Some(("sign", BUILTIN_MATH_SIGN)),
+        "sqrt" => Some(("sqrt", BUILTIN_MATH_SQRT)),
+        "trunc" => Some(("trunc", BUILTIN_MATH_TRUNC)),
+        "cbrt" => Some(("cbrt", BUILTIN_MATH_CBRT)),
+        "hypot" => Some(("hypot", BUILTIN_MATH_HYPOT)),
+        "pow" => Some(("pow", BUILTIN_MATH_POW)),
+        "random" => Some(("random", BUILTIN_MATH_RANDOM)),
+        "clz32" => Some(("clz32", BUILTIN_MATH_CLZ32)),
+        "imul" => Some(("imul", BUILTIN_MATH_IMUL)),
+        "sumPrecise" => Some(("sumPrecise", BUILTIN_MATH_SUMPRECISE)),
+        _ => None,
+    }
+}
+
+fn math_builtin_arity_supported(id: usize, argument_count: usize) -> bool {
+    match id {
+        BUILTIN_MATH_MAX | BUILTIN_MATH_MIN | BUILTIN_MATH_HYPOT => true,
+        BUILTIN_MATH_ATAN2 | BUILTIN_MATH_POW | BUILTIN_MATH_IMUL => argument_count <= 2,
+        BUILTIN_MATH_RANDOM => argument_count == 0,
+        BUILTIN_MATH_SUMPRECISE => argument_count == 1,
+        _ => argument_count <= 1,
+    }
+}
+
+fn math_builtin_arguments_supported(id: usize, arguments: &[Expr], analysis: &JitAnalysis) -> bool {
+    if !math_builtin_arity_supported(id, arguments.len()) || analysis.locals.contains("Math") {
+        return false;
+    }
+    if id == BUILTIN_MATH_SUMPRECISE {
+        return matches!(
+            arguments.first(),
+            Some(Expr::Array(elements))
+                if elements.iter().all(|element| element.as_ref().is_some_and(|value| supports_expression(value, analysis)))
+        ) || matches!(
+            arguments.first(),
+            Some(Expr::Var(name, ..)) if analysis.arrays.contains_key(name)
+        );
+    }
+    arguments.iter().all(|argument| supports_expression(argument, analysis))
 }
 
 fn simple_parameters(params: &[DestructuringElement]) -> Option<Vec<String>> {
@@ -2184,10 +2410,8 @@ fn supports_expression(expression: &Expr, analysis: &JitAnalysis) -> bool {
             }
         }
         Expr::Call(callee, arguments) => {
-            if is_math_abs_call(callee) {
-                return !analysis.locals.contains("Math")
-                    && arguments.len() == 1
-                    && arguments.iter().all(|argument| supports_expression(argument, analysis));
+            if let Some((_, id)) = math_numeric_builtin_call(callee) {
+                return math_builtin_arguments_supported(id, arguments, analysis);
             }
             let Expr::Var(name, ..) = &**callee else {
                 return false;
@@ -2211,6 +2435,8 @@ struct FunctionCompiler<'a, 'b> {
     pow_function: FuncRef,
     bitwise_function: FuncRef,
     bitwise_not_function: FuncRef,
+    math_builtin_function: FuncRef,
+    pointer_type: types::Type,
     inline_functions: HashMap<String, InlineFunction>,
 }
 
@@ -2231,6 +2457,48 @@ impl FunctionCompiler<'_, '_> {
             Some(_) => Err(format!("{name} is not a numeric local")),
             None => Err(format!("unknown local {name}")),
         }
+    }
+
+    fn compile_math_builtin_helper(&mut self, arguments: &[Expr], function_id: usize) -> Result<JitValue, String> {
+        let mut values = Vec::with_capacity(arguments.len());
+        for argument in arguments {
+            let JitValue::Number(value) = self.compile_expression(argument)? else {
+                return Err("Math builtin arguments must be numeric".to_string());
+            };
+            values.push(value);
+        }
+        self.compile_math_builtin_values(values, function_id)
+    }
+
+    fn compile_math_builtin_values(&mut self, values: Vec<cranelift_codegen::ir::Value>, function_id: usize) -> Result<JitValue, String> {
+        let arguments_pointer = if values.is_empty() {
+            self.builder.ins().iconst(self.pointer_type, 0)
+        } else {
+            let bytes = values
+                .len()
+                .checked_mul(std::mem::size_of::<f64>())
+                .and_then(|bytes| u32::try_from(bytes).ok())
+                .ok_or_else(|| "too many Math builtin arguments".to_string())?;
+            let stack_slot = self
+                .builder
+                .create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, bytes, 3));
+            let pointer = self.builder.ins().stack_addr(self.pointer_type, stack_slot, 0);
+            for (index, value) in values.iter().copied().enumerate() {
+                let offset = index
+                    .checked_mul(std::mem::size_of::<f64>())
+                    .and_then(|offset| i32::try_from(offset).ok())
+                    .ok_or_else(|| "too many Math builtin arguments".to_string())?;
+                self.builder.ins().store(MemFlagsData::new(), value, pointer, offset);
+            }
+            pointer
+        };
+        let length = self.builder.ins().iconst(self.pointer_type, values.len() as i64);
+        let function_id = self.builder.ins().iconst(types::I32, function_id as i64);
+        let call = self
+            .builder
+            .ins()
+            .call(self.math_builtin_function, &[arguments_pointer, length, function_id]);
+        Ok(JitValue::Number(self.builder.inst_results(call)[0]))
     }
 
     fn compile_lvalue(&mut self, expression: &Expr) -> Result<JitLValue, String> {
@@ -2454,14 +2722,77 @@ impl FunctionCompiler<'_, '_> {
                 Ok(JitValue::Number(self.read_lvalue(&target)))
             }
             Expr::Call(callee, arguments) => {
-                if is_math_abs_call(callee) {
-                    if self.locals.contains_key("Math") || arguments.len() != 1 {
-                        return Err("Math.abs requires the unshadowed Math global and one numeric argument".to_string());
+                if let Some((property, function_id)) = math_numeric_builtin_call(callee) {
+                    if self.locals.contains_key("Math") || !math_builtin_arity_supported(function_id, arguments.len()) {
+                        return Err(format!(
+                            "Math.{property} requires the unshadowed Math global and a supported number of numeric arguments"
+                        ));
+                    }
+                    if function_id == BUILTIN_MATH_SUMPRECISE {
+                        let [argument] = arguments.as_slice() else {
+                            return Err("Math.sumPrecise requires one virtual numeric array".to_string());
+                        };
+                        let values = match argument {
+                            Expr::Array(_) => match self.compile_expression(argument)? {
+                                JitValue::Array(elements) => elements.into_iter().map(|variable| self.builder.use_var(variable)).collect(),
+                                _ => return Err("Math.sumPrecise requires a virtual numeric array".to_string()),
+                            },
+                            Expr::Var(name, ..) => match self.locals.get(name) {
+                                Some(JitLocal::Array(elements)) => {
+                                    elements.iter().map(|variable| self.builder.use_var(*variable)).collect()
+                                }
+                                _ => return Err("Math.sumPrecise requires a virtual numeric array".to_string()),
+                            },
+                            _ => return Err("Math.sumPrecise requires a virtual numeric array".to_string()),
+                        };
+                        return self.compile_math_builtin_values(values, function_id);
+                    }
+                    if arguments.len() != 1 || !matches!(property, "abs" | "ceil" | "floor" | "round" | "sign" | "sqrt" | "trunc") {
+                        return self.compile_math_builtin_helper(arguments, function_id);
                     }
                     let JitValue::Number(argument) = self.compile_expression(&arguments[0])? else {
-                        return Err("Math.abs requires a numeric argument".to_string());
+                        return Err(format!("Math.{property} requires numeric arguments"));
                     };
-                    return Ok(JitValue::Number(self.builder.ins().fabs(argument)));
+                    let result = match property {
+                        "abs" => self.builder.ins().fabs(argument),
+                        "ceil" => self.builder.ins().ceil(argument),
+                        "floor" => self.builder.ins().floor(argument),
+                        "sqrt" => self.builder.ins().sqrt(argument),
+                        "sign" => {
+                            let zero = self.builder.ins().f64const(0.0);
+                            let negative_one = self.builder.ins().f64const(-1.0);
+                            let positive_one = self.builder.ins().f64const(1.0);
+                            let is_negative = self.builder.ins().fcmp(FloatCC::LessThan, argument, zero);
+                            let is_zero = self.builder.ins().fcmp(FloatCC::Equal, argument, zero);
+                            let is_nan = self.builder.ins().fcmp(FloatCC::Unordered, argument, argument);
+                            let sign = self.builder.ins().select(is_negative, negative_one, positive_one);
+                            let sign_or_nan = self.builder.ins().select(is_nan, argument, sign);
+                            self.builder.ins().select(is_zero, argument, sign_or_nan)
+                        }
+                        "trunc" => {
+                            let zero = self.builder.ins().f64const(0.0);
+                            let is_negative = self.builder.ins().fcmp(FloatCC::LessThan, argument, zero);
+                            let rounded_up = self.builder.ins().ceil(argument);
+                            let rounded_down = self.builder.ins().floor(argument);
+                            self.builder.ins().select(is_negative, rounded_up, rounded_down)
+                        }
+                        "round" => {
+                            let half = self.builder.ins().f64const(0.5);
+                            let shifted = self.builder.ins().fadd(argument, half);
+                            let rounded = self.builder.ins().floor(shifted);
+                            let zero = self.builder.ins().f64const(0.0);
+                            let negative_half = self.builder.ins().f64const(-0.5);
+                            let negative_zero = self.builder.ins().f64const(-0.0);
+                            let is_negative = self.builder.ins().fcmp(FloatCC::LessThan, argument, zero);
+                            let at_least_negative_half = self.builder.ins().fcmp(FloatCC::GreaterThanOrEqual, argument, negative_half);
+                            let negative_tie = self.builder.ins().select(is_negative, negative_zero, rounded);
+                            let rounded = self.builder.ins().select(at_least_negative_half, negative_tie, rounded);
+                            let is_zero = self.builder.ins().fcmp(FloatCC::Equal, argument, zero);
+                            self.builder.ins().select(is_zero, argument, rounded)
+                        }
+                        _ => unreachable!("recognized Math builtin"),
+                    };
+                    return Ok(JitValue::Number(result));
                 }
                 let Expr::Var(name, ..) = &**callee else {
                     return Err("only statically known numeric calls can be inlined".to_string());

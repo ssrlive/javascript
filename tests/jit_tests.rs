@@ -30,6 +30,300 @@ fn jit_required_mode_inlines_numeric_math_abs_with_interpreter_equivalent_result
 }
 
 #[test]
+fn jit_required_mode_matches_math_sqrt_edge_cases() {
+    let source = r#"
+        function squareRoot(value) { return Math.sqrt(value); }
+        squareRoot(81) === 9
+            && squareRoot(-1) !== squareRoot(-1)
+            && 1 / squareRoot(-0) === -Infinity
+            && squareRoot(1 / 0) === Infinity;
+    "#;
+    let mut interpreter = JsRuntime::new();
+    let expected = interpreter.eval(source).unwrap();
+    let mut runtime = JsRuntime::new();
+    runtime.set_jit_required(true);
+
+    let result = runtime.eval(source).unwrap();
+
+    assert_eq!(result, expected);
+    assert_eq!(result, JsValue::Boolean(true));
+}
+
+#[test]
+fn jit_falls_back_to_interpreter_when_math_sqrt_is_replaced() {
+    let mut runtime = JsRuntime::new();
+    runtime.eval("function squareRoot(value) { return Math.sqrt(value); }").unwrap();
+    runtime.eval("Math.sqrt = function(value) { return 77; };").unwrap();
+
+    let result = runtime.eval("squareRoot(81);").unwrap();
+
+    assert_eq!(result, JsValue::Number(77.0));
+}
+
+#[test]
+fn jit_required_mode_matches_math_sign_nan_infinity_and_signed_zero() {
+    let source = r#"
+        function sign(value) { return Math.sign(value); }
+        sign(-12) === -1
+            && sign(0) === 0
+            && 1 / sign(-0) === -Infinity
+            && sign(NaN) !== sign(NaN)
+            && sign(Infinity) === 1
+            && sign(-Infinity) === -1;
+    "#;
+    let mut interpreter = JsRuntime::new();
+    let expected = interpreter.eval(source).unwrap();
+    let mut runtime = JsRuntime::new();
+    runtime.set_jit_required(true);
+
+    let result = runtime.eval(source).unwrap();
+
+    assert_eq!(result, expected);
+    assert_eq!(result, JsValue::Boolean(true));
+}
+
+#[test]
+fn jit_falls_back_to_interpreter_when_math_sign_is_replaced() {
+    let mut runtime = JsRuntime::new();
+    runtime.eval("function sign(value) { return Math.sign(value); }").unwrap();
+    runtime.eval("Math.sign = function(value) { return 77; };").unwrap();
+
+    let result = runtime.eval("sign(-12);").unwrap();
+
+    assert_eq!(result, JsValue::Number(77.0));
+}
+
+#[test]
+fn jit_required_mode_matches_remaining_numeric_math_builtins() {
+    let source = r#"
+        function sin(value) { return Math.sin(value); }
+        function cos(value) { return Math.cos(value); }
+        function tan(value) { return Math.tan(value); }
+        function asin(value) { return Math.asin(value); }
+        function acos(value) { return Math.acos(value); }
+        function atan(value) { return Math.atan(value); }
+        function atan2(y, x) { return Math.atan2(y, x); }
+        function sinh(value) { return Math.sinh(value); }
+        function cosh(value) { return Math.cosh(value); }
+        function tanh(value) { return Math.tanh(value); }
+        function asinh(value) { return Math.asinh(value); }
+        function acosh(value) { return Math.acosh(value); }
+        function atanh(value) { return Math.atanh(value); }
+        function exp(value) { return Math.exp(value); }
+        function expm1(value) { return Math.expm1(value); }
+        function log(value) { return Math.log(value); }
+        function log10(value) { return Math.log10(value); }
+        function log1p(value) { return Math.log1p(value); }
+        function log2(value) { return Math.log2(value); }
+        function fround(value) { return Math.fround(value); }
+        function f16round(value) { return Math.f16round(value); }
+        function cbrt(value) { return Math.cbrt(value); }
+        function max(a, b) { return Math.max(a, b); }
+        function min(a, b) { return Math.min(a, b); }
+        function maxEmpty() { return Math.max(); }
+        function minEmpty() { return Math.min(); }
+        function hypot(a, b) { return Math.hypot(a, b); }
+        function hypotEmpty() { return Math.hypot(); }
+        function pow(a, b) { return Math.pow(a, b); }
+        function hypotWithNaNAndInfinity(a, b) { return Math.hypot(a, b); }
+        function clz32(value) { return Math.clz32(value); }
+        function imul(a, b) { return Math.imul(a, b); }
+        function sinEmpty() { return Math.sin(); }
+        function precise() { return Math.sumPrecise([1e16, 1, -1e16]); }
+        function preciseEmpty() { return Math.sumPrecise([]); }
+        function preciseLocal() {
+            const values = [1e16, 1, -1e16];
+            return Math.sumPrecise(values);
+        }
+        sin(0) === 0
+            && cos(0) === 1
+            && tan(0) === 0
+            && asin(0) === 0
+            && acos(1) === 0
+            && atan(0) === 0
+            && atan2(0, 1) === 0
+            && sinh(0) === 0
+            && cosh(0) === 1
+            && tanh(0) === 0
+            && asinh(0) === 0
+            && acosh(1) === 0
+            && atanh(0) === 0
+            && exp(0) === 1
+            && expm1(0) === 0
+            && log(1) === 0
+            && log10(1) === 0
+            && log1p(0) === 0
+            && log2(1) === 0
+            && fround(1.5) === 1.5
+            && f16round(1.5) === 1.5
+            && cbrt(-8) === -2
+            && maxEmpty() === -Infinity
+            && max(-0, 0) === 0
+            && 1 / max(-0, 0) === Infinity
+            && minEmpty() === Infinity
+            && 1 / min(-0, 0) === -Infinity
+            && hypotEmpty() === 0
+            && hypot(3, 4) === 5
+            && hypotWithNaNAndInfinity(NaN, Infinity) === Infinity
+            && pow(2, 3) === 8
+            && pow(42, 0) === 1
+            && pow(-1, Infinity) !== pow(-1, Infinity)
+            && clz32(1) === 31
+            && imul(2147483647, 2) === -2
+            && precise() === 1
+            && 1 / preciseEmpty() === -Infinity
+            && preciseLocal() === 1
+            && sinEmpty() !== sinEmpty();
+    "#;
+    let mut interpreter = JsRuntime::new();
+    let expected = interpreter.eval(source).unwrap();
+    let mut runtime = JsRuntime::new();
+    runtime.set_jit_required(true);
+
+    let result = runtime.eval(source).unwrap();
+
+    assert_eq!(result, expected);
+    assert_eq!(result, JsValue::Boolean(true));
+}
+
+#[test]
+fn jit_required_mode_executes_math_random_through_the_host_helper() {
+    let mut runtime = JsRuntime::new();
+    runtime.set_jit_required(true);
+
+    let result = runtime.eval("function random() { return Math.random(); } random();").unwrap();
+
+    let JsValue::Number(value) = result else {
+        panic!("Math.random should return a number");
+    };
+    assert!((0.0..1.0).contains(&value));
+}
+
+#[test]
+fn jit_falls_back_to_interpreter_when_math_sin_is_replaced() {
+    let mut runtime = JsRuntime::new();
+    runtime.eval("function sine(value) { return Math.sin(value); }").unwrap();
+    runtime.eval("Math.sin = function(value) { return 77; };").unwrap();
+
+    let result = runtime.eval("sine(0);").unwrap();
+
+    assert_eq!(result, JsValue::Number(77.0));
+}
+
+#[test]
+fn jit_falls_back_to_interpreter_when_math_sum_precise_is_replaced() {
+    let mut runtime = JsRuntime::new();
+    runtime.eval("function precise() { return Math.sumPrecise([1, 2, 3]); }").unwrap();
+    runtime.eval("Math.sumPrecise = function(values) { return 77; };").unwrap();
+
+    let result = runtime.eval("precise();").unwrap();
+
+    assert_eq!(result, JsValue::Number(77.0));
+}
+
+#[test]
+fn jit_falls_back_to_interpreter_when_array_iterator_is_replaced_for_sum_precise() {
+    let mut runtime = JsRuntime::new();
+    runtime.eval("function precise() { return Math.sumPrecise([1, 2, 3]); }").unwrap();
+    runtime
+        .eval(
+            "Array.prototype[Symbol.iterator] = function() { \
+                 return { next: function() { return { done: true }; } }; \
+             };",
+        )
+        .unwrap();
+
+    let result = runtime.eval("1 / precise() === -Infinity;").unwrap();
+
+    assert_eq!(result, JsValue::Boolean(true));
+}
+
+#[test]
+fn jit_required_mode_rejects_replaced_array_iterator_for_sum_precise() {
+    let mut runtime = JsRuntime::new();
+    runtime.set_jit_required(true);
+
+    let error = runtime
+        .eval(
+            "function precise() { return Math.sumPrecise([1, 2, 3]); } \
+             Array.prototype[Symbol.iterator] = function() { \
+                 return { next: function() { return { done: true }; } }; \
+             }; \
+             precise();",
+        )
+        .unwrap_err();
+
+    assert!(error.to_string().contains("changed dependencies"));
+}
+
+#[test]
+fn jit_required_mode_inlines_numeric_math_floor_and_ceil_with_interpreter_equivalent_results() {
+    let source = r#"
+        function roundDown(value) { return Math.floor(value); }
+        function roundUp(value) { return Math.ceil(value); }
+        roundDown(-1.25) === -2
+            && 1 / roundUp(-0.25) === -Infinity
+            && roundDown(1 / 0) === Infinity
+            && roundUp(-1 / 0) === -Infinity;
+    "#;
+    let mut interpreter = JsRuntime::new();
+    let expected = interpreter.eval(source).unwrap();
+    let mut runtime = JsRuntime::new();
+    runtime.set_jit_required(true);
+
+    let result = runtime.eval(source).unwrap();
+
+    assert_eq!(result, expected);
+    assert_eq!(result, JsValue::Boolean(true));
+}
+
+#[test]
+fn jit_falls_back_to_interpreter_when_math_floor_is_replaced() {
+    let mut runtime = JsRuntime::new();
+    runtime.eval("function roundDown(value) { return Math.floor(value); }").unwrap();
+    runtime.eval("Math.floor = function(value) { return 77; };").unwrap();
+
+    let result = runtime.eval("roundDown(-1.25);").unwrap();
+
+    assert_eq!(result, JsValue::Number(77.0));
+}
+
+#[test]
+fn jit_required_mode_matches_math_round_ties_and_math_trunc_negative_zero() {
+    let source = r#"
+        function round(value) { return Math.round(value); }
+        function truncate(value) { return Math.trunc(value); }
+        round(0.5) === 1
+            && round(-1.5) === -1
+            && 1 / round(-0.5) === -Infinity
+            && 1 / round(-0) === -Infinity
+            && truncate(-1.9) === -1
+            && 1 / truncate(-0.2) === -Infinity
+            && truncate(1 / 0) === Infinity;
+    "#;
+    let mut interpreter = JsRuntime::new();
+    let expected = interpreter.eval(source).unwrap();
+    let mut runtime = JsRuntime::new();
+    runtime.set_jit_required(true);
+
+    let result = runtime.eval(source).unwrap();
+
+    assert_eq!(result, expected);
+    assert_eq!(result, JsValue::Boolean(true));
+}
+
+#[test]
+fn jit_falls_back_to_interpreter_when_math_round_is_replaced() {
+    let mut runtime = JsRuntime::new();
+    runtime.eval("function round(value) { return Math.round(value); }").unwrap();
+    runtime.eval("Math.round = function(value) { return 77; };").unwrap();
+
+    let result = runtime.eval("round(-1.25);").unwrap();
+
+    assert_eq!(result, JsValue::Number(77.0));
+}
+
+#[test]
 fn jit_falls_back_to_interpreter_when_math_abs_is_replaced() {
     let mut runtime = JsRuntime::new();
     runtime
@@ -58,6 +352,22 @@ fn jit_required_mode_rejects_replaced_math_abs_dependency() {
         .unwrap_err();
 
     assert!(error.to_string().contains("changed dependencies"));
+}
+
+#[test]
+fn jit_falls_back_when_array_iterator_next_is_replaced_for_sum_precise() {
+    let mut runtime = JsRuntime::new();
+    runtime.eval("function precise() { return Math.sumPrecise([1, 2, 3]); }").unwrap();
+    runtime
+        .eval(
+            "Array.prototype[Symbol.iterator] = function() { return [1, 2, 3]; }; \
+             Object.getPrototypeOf([1, 2, 3][Symbol.iterator]()).next = function() { return { done: true }; };",
+        )
+        .unwrap();
+
+    let result = runtime.eval("1 / precise() === -Infinity;").unwrap();
+
+    assert_eq!(result, JsValue::Boolean(true));
 }
 
 #[test]

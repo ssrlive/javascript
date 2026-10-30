@@ -175,6 +175,11 @@ pub(crate) enum JitDependency {
         property: String,
         function_id: usize,
     },
+    BuiltinHostFunctionProperty {
+        object: String,
+        property: String,
+        function_name: String,
+    },
 }
 
 pub(crate) fn invoke_native_jit(

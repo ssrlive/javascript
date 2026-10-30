@@ -29,8 +29,9 @@ mod uri;
 pub(crate) use bigint::{compare_bigint_number, parse_bigint_string};
 pub(crate) use regexp::get_or_compile_regex;
 use typedarray::coerce_typed_array_value;
+pub(crate) use typedarray::f16round;
 use typedarray::{coerce_bigint_for_ta, is_bigint_typed_array};
-use typedarray::{f16_bits_to_f64, f16round, f64_to_f16_bits};
+use typedarray::{f16_bits_to_f64, f64_to_f16_bits};
 
 use std::collections::HashMap;
 use unicode_normalization::UnicodeNormalization;
@@ -147,6 +148,146 @@ pub(crate) fn number_pow(base: f64, exponent: f64) -> f64 {
         f64::NAN
     } else {
         base.powf(exponent)
+    }
+}
+
+pub(crate) fn math_sum_precise_numbers(mut numbers: Vec<f64>) -> f64 {
+    if numbers.is_empty() {
+        return -0.0;
+    }
+    let mut has_pos_inf = false;
+    let mut has_neg_inf = false;
+    for &number in &numbers {
+        if number.is_nan() {
+            return f64::NAN;
+        }
+        has_pos_inf |= number == f64::INFINITY;
+        has_neg_inf |= number == f64::NEG_INFINITY;
+    }
+    if has_pos_inf && has_neg_inf {
+        return f64::NAN;
+    }
+    if has_pos_inf {
+        return f64::INFINITY;
+    }
+    if has_neg_inf {
+        return f64::NEG_INFINITY;
+    }
+
+    fn two_sum(a: f64, b: f64) -> (f64, f64) {
+        let sum = a + b;
+        let v = sum - a;
+        let error = (a - (sum - v)) + (b - v);
+        (sum, error)
+    }
+
+    let count = numbers.len();
+    let scale_exponent = if count <= 1 {
+        0u32
+    } else {
+        ((2 * count) as f64).log2().ceil() as u32
+    };
+    let scale_down = if scale_exponent == 0 {
+        1.0
+    } else {
+        (0.5_f64).powi(scale_exponent as i32)
+    };
+    let scale_up = if scale_exponent == 0 {
+        1.0
+    } else {
+        (2.0_f64).powi(scale_exponent as i32)
+    };
+
+    numbers.sort_by(|a, b| a.abs().partial_cmp(&b.abs()).unwrap());
+
+    let mut expansion = vec![0.0];
+    for &number in &numbers {
+        let mut q = number * scale_down;
+        let mut new_expansion = Vec::with_capacity(expansion.len() + 1);
+        for &component in &expansion {
+            let (next_q, error) = two_sum(q, component);
+            if error != 0.0 {
+                new_expansion.push(error);
+            }
+            q = next_q;
+        }
+        if q != 0.0 || new_expansion.is_empty() {
+            new_expansion.push(q);
+        }
+        expansion = new_expansion;
+    }
+
+    let expansion_len = expansion.len();
+    if expansion_len == 0 {
+        -0.0
+    } else if expansion_len == 1 {
+        let result = expansion[0] * scale_up;
+        if result == 0.0 && !result.is_sign_negative() && numbers.iter().all(|value| *value == 0.0 && value.is_sign_negative()) {
+            -0.0
+        } else {
+            result
+        }
+    } else {
+        let high = expansion[expansion_len - 1];
+        let low = expansion[expansion_len - 2];
+        let candidate = high + low;
+        let residual = (high - candidate) + low;
+
+        let mut rest_sign = 0i8;
+        for component in expansion[..expansion_len.saturating_sub(2)].iter().rev() {
+            if *component > 0.0 {
+                rest_sign = 1;
+                break;
+            } else if *component < 0.0 {
+                rest_sign = -1;
+                break;
+            }
+        }
+
+        let result = candidate * scale_up;
+        if result.is_infinite() || result.abs() == f64::MAX {
+            let max_scaled = f64::MAX * scale_down;
+            let half_ulp_max_scaled = (2.0_f64).powi(970 - scale_exponent as i32);
+
+            if candidate > 0.0 {
+                let effective = (candidate - max_scaled) + residual;
+                if effective > half_ulp_max_scaled || (effective == half_ulp_max_scaled && rest_sign >= 0) {
+                    f64::INFINITY
+                } else {
+                    f64::MAX
+                }
+            } else {
+                let effective = (candidate + max_scaled) + residual;
+                if effective < -half_ulp_max_scaled || (effective == -half_ulp_max_scaled && rest_sign <= 0) {
+                    f64::NEG_INFINITY
+                } else {
+                    -f64::MAX
+                }
+            }
+        } else if residual == 0.0 {
+            if result == 0.0 && !result.is_sign_negative() && numbers.iter().all(|value| *value == 0.0 && value.is_sign_negative()) {
+                -0.0
+            } else {
+                result
+            }
+        } else {
+            let needs_adjust = if residual > 0.0 { rest_sign > 0 } else { rest_sign < 0 };
+            if needs_adjust && candidate.is_finite() {
+                let bits = candidate.to_bits();
+                let adjusted_scaled = if (residual > 0.0 && candidate >= 0.0) || (residual < 0.0 && candidate < 0.0) {
+                    f64::from_bits(bits + 1)
+                } else if candidate == 0.0 && residual < 0.0 {
+                    -f64::MIN_POSITIVE
+                } else {
+                    f64::from_bits(bits - 1)
+                };
+                adjusted_scaled * scale_up
+            } else if result == 0.0 && !result.is_sign_negative() && numbers.iter().all(|value| *value == 0.0 && value.is_sign_negative()) {
+                -0.0
+            } else {
+                result
+            }
+        }
     }
 }
 
@@ -25364,149 +25505,7 @@ impl<'gc> VM<'gc> {
                         }
                     }
                 }
-                if numbers.is_empty() {
-                    return Value::Number(-0.0);
-                }
-                let mut has_pos_inf = false;
-                let mut has_neg_inf = false;
-                for &n in &numbers {
-                    if n.is_nan() {
-                        return Value::Number(f64::NAN);
-                    }
-                    if n == f64::INFINITY {
-                        has_pos_inf = true;
-                    }
-                    if n == f64::NEG_INFINITY {
-                        has_neg_inf = true;
-                    }
-                }
-                if has_pos_inf && has_neg_inf {
-                    return Value::Number(f64::NAN);
-                }
-                if has_pos_inf {
-                    return Value::Number(f64::INFINITY);
-                }
-                if has_neg_inf {
-                    return Value::Number(f64::NEG_INFINITY);
-                }
-                // Precise summation using scaled Shewchuk expansion.
-                // Scale all values by 2^(-K) to prevent overflow during
-                // intermediate two_sum operations, run Shewchuk, then scale
-                // back by 2^K. Power-of-2 scaling is exact in IEEE 754, so
-                // this preserves correctness (round(S/2^K)*2^K == round(S)).
-                fn two_sum(a: f64, b: f64) -> (f64, f64) {
-                    let s = a + b;
-                    let v = s - a;
-                    let e = (a - (s - v)) + (b - v);
-                    (s, e)
-                }
-
-                let n = numbers.len();
-                // K = ceil(log2(2*N)) ensures intermediate sums stay < MAX.
-                let k = if n <= 1 { 0u32 } else { ((2 * n) as f64).log2().ceil() as u32 };
-                let scale_down = if k == 0 { 1.0 } else { (0.5_f64).powi(k as i32) };
-                let scale_up = if k == 0 { 1.0 } else { (2.0_f64).powi(k as i32) };
-
-                // Sort by ascending absolute value for Shewchuk
-                // grow-expansion precision (small values first).
-                numbers.sort_by(|a, b| a.abs().partial_cmp(&b.abs()).unwrap());
-
-                let mut expansion: Vec<f64> = vec![0.0];
-                for &val in numbers.iter() {
-                    let scaled = val * scale_down;
-                    let mut q = scaled;
-                    let mut new_e = Vec::with_capacity(expansion.len() + 1);
-                    for &ei in expansion.iter() {
-                        let (nq, ne) = two_sum(q, ei);
-                        if ne != 0.0 {
-                            new_e.push(ne);
-                        }
-                        q = nq;
-                    }
-                    if q != 0.0 || new_e.is_empty() {
-                        new_e.push(q);
-                    }
-                    expansion = new_e;
-                }
-
-                let n_exp = expansion.len();
-                if n_exp == 0 {
-                    Value::Number(-0.0)
-                } else if n_exp == 1 {
-                    let r = expansion[0] * scale_up;
-                    if r == 0.0 && !r.is_sign_negative() && numbers.iter().all(|v| *v == 0.0 && v.is_sign_negative()) {
-                        Value::Number(-0.0)
-                    } else {
-                        Value::Number(r)
-                    }
-                } else {
-                    let hi = expansion[n_exp - 1];
-                    let lo = expansion[n_exp - 2];
-                    let candidate = hi + lo;
-                    let residual = (hi - candidate) + lo;
-
-                    let mut rest_sign = 0i8;
-                    for i in (0..n_exp.saturating_sub(2)).rev() {
-                        if expansion[i] > 0.0 {
-                            rest_sign = 1;
-                            break;
-                        } else if expansion[i] < 0.0 {
-                            rest_sign = -1;
-                            break;
-                        }
-                    }
-
-                    let result = candidate * scale_up;
-
-                    // At the ±MAX/±Infinity overflow boundary, the scaling
-                    // property round(S/2^K)*2^K == round(S) can break.
-                    // Use the expansion residual to decide correctly.
-                    if result.is_infinite() || result.abs() == f64::MAX {
-                        let max_scaled = f64::MAX * scale_down;
-                        let half_ulp_max_scaled = (2.0_f64).powi(970 - k as i32);
-
-                        if candidate > 0.0 {
-                            let effective = (candidate - max_scaled) + residual;
-                            if effective > half_ulp_max_scaled || (effective == half_ulp_max_scaled && rest_sign >= 0) {
-                                Value::Number(f64::INFINITY)
-                            } else {
-                                Value::Number(f64::MAX)
-                            }
-                        } else {
-                            let effective = (candidate + max_scaled) + residual;
-                            if effective < -half_ulp_max_scaled || (effective == -half_ulp_max_scaled && rest_sign <= 0) {
-                                Value::Number(f64::NEG_INFINITY)
-                            } else {
-                                Value::Number(-f64::MAX)
-                            }
-                        }
-                    } else if residual == 0.0 {
-                        if result == 0.0 && !result.is_sign_negative() && numbers.iter().all(|v| *v == 0.0 && v.is_sign_negative()) {
-                            Value::Number(-0.0)
-                        } else {
-                            Value::Number(result)
-                        }
-                    } else {
-                        // Tie-breaking: adjust when rest pushes past
-                        // an exact tie (|residual| == ULP(candidate)/2).
-                        let needs_adjust = if residual > 0.0 { rest_sign > 0 } else { rest_sign < 0 };
-                        if needs_adjust && candidate.is_finite() {
-                            let bits = candidate.to_bits();
-                            let adjusted_scaled = if (residual > 0.0 && candidate >= 0.0) || (residual < 0.0 && candidate < 0.0) {
-                                f64::from_bits(bits + 1)
-                            } else if candidate == 0.0 && residual < 0.0 {
-                                -f64::MIN_POSITIVE
-                            } else {
-                                f64::from_bits(bits - 1)
-                            };
-                            Value::Number(adjusted_scaled * scale_up)
-                        } else if result == 0.0 && !result.is_sign_negative() && numbers.iter().all(|v| *v == 0.0 && v.is_sign_negative()) {
-                            Value::Number(-0.0)
-                        } else {
-                            Value::Number(result)
-                        }
-                    }
-                }
+                Value::Number(math_sum_precise_numbers(numbers))
             }
             BUILTIN_REGEXP_ESCAPE => {
                 let arg = args.first().cloned().unwrap_or(Value::Undefined);

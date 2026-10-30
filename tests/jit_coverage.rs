@@ -60,7 +60,47 @@ const AST_NATIVE_OPCODES: &[&str] = &[
     "GetIndex",
     "SetIndex",
 ];
-const DIRECT_NATIVE_BUILTINS: &[&str] = &["BUILTIN_MATH_ABS"];
+const DIRECT_NATIVE_BUILTINS: &[&str] = &[
+    "BUILTIN_MATH_ABS",
+    "BUILTIN_MATH_CEIL",
+    "BUILTIN_MATH_FLOOR",
+    "BUILTIN_MATH_ROUND",
+    "BUILTIN_MATH_SIGN",
+    "BUILTIN_MATH_SQRT",
+    "BUILTIN_MATH_TRUNC",
+];
+const INFRASTRUCTURE_MATH_BUILTINS: &[&str] = &[
+    "BUILTIN_MATH_MAX",
+    "BUILTIN_MATH_MIN",
+    "BUILTIN_MATH_SIN",
+    "BUILTIN_MATH_COS",
+    "BUILTIN_MATH_TAN",
+    "BUILTIN_MATH_ASIN",
+    "BUILTIN_MATH_ACOS",
+    "BUILTIN_MATH_ATAN",
+    "BUILTIN_MATH_ATAN2",
+    "BUILTIN_MATH_SINH",
+    "BUILTIN_MATH_COSH",
+    "BUILTIN_MATH_TANH",
+    "BUILTIN_MATH_ASINH",
+    "BUILTIN_MATH_ACOSH",
+    "BUILTIN_MATH_ATANH",
+    "BUILTIN_MATH_EXP",
+    "BUILTIN_MATH_EXPM1",
+    "BUILTIN_MATH_LOG",
+    "BUILTIN_MATH_LOG10",
+    "BUILTIN_MATH_LOG1P",
+    "BUILTIN_MATH_LOG2",
+    "BUILTIN_MATH_FROUND",
+    "BUILTIN_MATH_F16ROUND",
+    "BUILTIN_MATH_CBRT",
+    "BUILTIN_MATH_HYPOT",
+    "BUILTIN_MATH_POW",
+    "BUILTIN_MATH_RANDOM",
+    "BUILTIN_MATH_CLZ32",
+    "BUILTIN_MATH_IMUL",
+    "BUILTIN_MATH_SUMPRECISE",
+];
 
 #[test]
 fn report_opcode_and_builtin_jit_coverage_by_semantic_family() {
@@ -103,6 +143,12 @@ fn report_opcode_and_builtin_jit_coverage_by_semantic_family() {
             "stale native builtin entry: {builtin}"
         );
     }
+    for builtin in INFRASTRUCTURE_MATH_BUILTINS {
+        assert!(
+            builtins.iter().any(|(name, _)| name == builtin),
+            "stale infrastructure builtin entry: {builtin}"
+        );
+    }
 
     println!("JIT coverage audit by semantic family");
     for opcode in opcodes {
@@ -118,10 +164,19 @@ fn report_opcode_and_builtin_jit_coverage_by_semantic_family() {
 
 fn builtin_status(name: &str) -> (&'static str, &'static str) {
     if DIRECT_NATIVE_BUILTINS.contains(&name) {
-        (
-            "native",
-            "numeric Math.abs inlining guarded by the runtime Math.abs builtin identity",
-        )
+        ("native", "numeric Math builtin inlining guarded by the runtime builtin identity")
+    } else if INFRASTRUCTURE_MATH_BUILTINS.contains(&name) {
+        if name == "BUILTIN_MATH_SUMPRECISE" {
+            (
+                "infrastructure",
+                "precise summation for verified virtual numeric arrays; general iterables remain interpreter-only",
+            )
+        } else {
+            (
+                "infrastructure",
+                "numeric Math builtin dispatched through the JIT host helper with a runtime identity guard",
+            )
+        }
     } else {
         ("uncovered", "not dispatched from native JIT")
     }

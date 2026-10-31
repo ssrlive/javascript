@@ -176,7 +176,10 @@ only for operations that require it. Boxed/coercible receivers still use owned
 input snapshots before argument coercion or callbacks; code-unit operations
 such as `slice` and `charCodeAt` keep the original UTF-16 input. This reduces
 helper allocations without native String loop lowering.
-
+Ordinary object assignments can also update existing own writable data slots
+directly when the receiver is unchanged and the property is neither private nor
+`__proto__`. Read-only properties, proxies, integrity flags and setter paths
+retain generic semantics.
 Numeric indexed access avoids property-key construction for real TypedArrays
 and verified existing dense-array elements. TypedArray writes reuse the ordinary
 property setter's coercion and post-coercion detached/resizable-buffer checks;

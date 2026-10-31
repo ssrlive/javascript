@@ -15097,6 +15097,22 @@ impl<'gc> VM<'gc> {
         }
         if let Value::Object(map) = &obj {
             let borrow = map.borrow();
+            if !key.contains(super::PRIVATE_KEY_PREFIX)
+                && key != "__proto__"
+                && receiver.is_none_or(|target| self.values_same(target, obj))
+                && !matches!(borrow.get("__frozen__"), Some(Value::Boolean(true)))
+                && let Some(existing) = borrow.get(key)
+                && !matches!(existing, Value::Property { .. })
+                && !has_readonly_mark(&borrow, key)
+            {
+                drop(borrow);
+                let mut b = map.borrow_mut(ctx);
+                b.insert(key.to_string(), val.clone());
+                if Gc::ptr_eq(*map, self.global_this) {
+                    self.globals.insert(key.to_string(), val.clone());
+                }
+                return Ok(val.clone());
+            }
             let is_frozen = matches!(borrow.get("__frozen__"), Some(Value::Boolean(true)));
             let is_non_ext = matches!(borrow.get("__non_extensible__"), Some(Value::Boolean(true)));
             let own_desc = if key == "__proto__" {

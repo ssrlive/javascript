@@ -310,6 +310,57 @@ fn jit_dense_pop_preserves_length_descriptors_and_tail_identity() {
 }
 
 #[test]
+fn jit_object_assignment_fastpath_preserves_setter_and_integrity_rules() {
+    let source = r#"
+        const out = [];
+        const plain = { value: 1 };
+        plain.value = 5;
+        out.push(plain.value);
+
+        Object.preventExtensions(plain);
+        plain.value = 9;
+        out.push(plain.value);
+        try { plain.extra = 1; } catch { out.push("noext", plain.extra === undefined); }
+
+        let setter_calls = 0;
+        const proto = { set value(v) { setter_calls += v; } };
+        const inherited = Object.create(proto);
+        inherited.value = 4;
+        out.push(setter_calls, inherited.hasOwnProperty("value"));
+
+        const own_data = Object.create(proto);
+        Object.defineProperty(own_data, "value", { value: 3, writable: true, configurable: true, enumerable: true });
+        own_data.value = 11;
+        out.push(own_data.value, setter_calls);
+
+        const readonly = {};
+        Object.defineProperty(readonly, "value", { value: 7, writable: false });
+        try { readonly.value = 12; } catch { out.push(readonly.value); }
+
+        const trap_log = [];
+        const target = { value: 2 };
+        const proxy = new Proxy(target, {
+            set(obj, key, value, receiver) {
+                trap_log.push(String(key) + ":" + value + ":" + (receiver === proxy));
+                return Reflect.set(obj, key, value, receiver);
+            }
+        });
+        proxy.value = 6;
+        out.push(target.value, trap_log.join(","));
+        out.join("|");
+    "#;
+    let expected = JsRuntime::with_gc_opcode_budget(1).unwrap().eval(source).unwrap();
+    for required in [false, true] {
+        let mut runtime = JsRuntime::new();
+        runtime.set_jit_required(required);
+        assert_eq!(runtime.eval(source).unwrap(), expected);
+        if required {
+            assert_no_interpreter(&mut runtime);
+        }
+    }
+}
+
+#[test]
 fn jit_string_borrowing_preserves_utf16_snapshots_and_coercion_order() {
     let source = r#"
         const results = [];

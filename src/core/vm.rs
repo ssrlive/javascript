@@ -40125,7 +40125,15 @@ impl<'gc> VM<'gc> {
         {
             return Some(position);
         }
-        let position = entries.iter().position(|entry| self.values_same_zero(entry_key(entry), key));
+        let position = match key {
+            Value::Number(number) if number.is_nan() => entries
+                .iter()
+                .position(|entry| matches!(entry_key(entry), Value::Number(candidate) if candidate.is_nan())),
+            Value::Number(number) => entries
+                .iter()
+                .position(|entry| matches!(entry_key(entry), Value::Number(candidate) if candidate == number)),
+            _ => entries.iter().position(|entry| self.values_same_zero(entry_key(entry), key)),
+        };
         if let Some(hint_key) = hint_key {
             let mut hints = self.collection_lookup_hints.borrow_mut();
             if let Some(position) = position {

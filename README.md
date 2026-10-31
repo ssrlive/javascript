@@ -206,7 +206,9 @@ Map/Set numeric lookups keep bounded position hints for collections with at leas
 16 entries. Every hit checks the current entry with SameValueZero; stale positions
 and misses use the existing linear search. The hints contain only address tokens,
 numeric key bits, and positions, never GC references, and the per-VM table is capped
-at 1,024 hints. Deletion preserves insertion order. This is not a general hash-table
+at 1,024 hints. Numeric miss scans compare only numeric candidates before falling
+back to SameValueZero for other key kinds. Deletion preserves insertion order.
+This is not a general hash-table
 replacement: other key types, cold lookups, and unsupported collection operations
 retain their existing paths.
 

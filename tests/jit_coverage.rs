@@ -7,6 +7,11 @@ const FUNCTION_ID_SOURCE: &str = include_str!("../src/core/function_id.rs");
 const BASELINE_SOURCE: &str = include_str!("../src/core/vm/runner.rs");
 const UNCOVERED_BASELINE_OPCODES: &[&str] = &["DisposeResources", "DisposeResourcesAsync"];
 const BASELINE_SEMANTIC_TESTS: &[(&str, &[&str])] = &[
+    ("jit_integer_remainder_matches_number_semantics_at_conversion_boundaries", &["Mod"]),
+    (
+        "jit_tail_calls_enter_native_functions_without_bypassing_the_callers_return",
+        &["Call", "TailCall", "Return"],
+    ),
     (
         "jit_native_numeric_loops_keep_locals_in_registers_across_backedges",
         &[
@@ -16,6 +21,7 @@ const BASELINE_SEMANTIC_TESTS: &[(&str, &[&str])] = &[
             "Sub",
             "Mul",
             "Div",
+            "Mod",
             "Jump",
             "JumpIfFalse",
             "ReboxLocal",
@@ -108,7 +114,6 @@ const DIRECT_NATIVE_OPCODES: &[&str] = &[
     "TeardownTry",
 ];
 const INFRASTRUCTURE_OPCODES: &[&str] = &[
-    "Mod",
     "Pow",
     "BitwiseAnd",
     "BitwiseOr",
@@ -120,6 +125,7 @@ const INFRASTRUCTURE_OPCODES: &[&str] = &[
 ];
 const AST_NATIVE_OPCODES: &[&str] = &[
     "Call",
+    "TailCall",
     "NewArray",
     "NewObject",
     "GetProperty",
@@ -325,19 +331,23 @@ fn opcode_status(name: &str, baseline_opcodes: &HashSet<&str>) -> (&'static str,
         ("native", "numeric captures loaded through the traced closure-cell ABI")
     } else if name == "SetUpvalue" {
         ("native", "numeric captures written through the traced closure-cell ABI")
+    } else if name == "Mod" {
+        (
+            "native",
+            "exact signed integer remainder with 32/64-bit guards and signed zero; other Number inputs call fmod",
+        )
     } else if DIRECT_NATIVE_OPCODES.contains(&name) {
         ("native", "restricted numeric/boolean bytecode specialization")
     } else if AST_NATIVE_OPCODES.contains(&name) {
         match name {
-            "Call" => (
+            "Call" | "TailCall" => (
                 "native",
-                "limited numeric inlining, generic identity ABI dispatch, and numeric-capture closure calls",
+                "limited numeric inlining and guarded numeric/identity/closure ABI dispatch, including tail-position calls",
             ),
             _ => ("native", "AST-only virtual scalar array/object subset"),
         }
     } else if INFRASTRUCTURE_OPCODES.contains(&name) {
         match name {
-            "Mod" => ("infrastructure", "calls the registered fmod host helper"),
             "Pow" => ("infrastructure", "calls the shared JS number-pow helper"),
             "BitwiseAnd" | "BitwiseOr" | "BitwiseXor" | "ShiftLeft" | "ShiftRight" | "UnsignedShiftRight" => {
                 ("infrastructure", "calls the shared JS ToInt32/ToUint32 helper")

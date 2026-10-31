@@ -1625,7 +1625,7 @@ impl<'gc> VM<'gc> {
                 } else {
                     Some(Value::Object(self.global_this))
                 };
-                if !is_method && !is_tail_call && arg_count == arity as usize {
+                if !is_method && arg_count == arity as usize {
                     let argument_values = &self.stack[callee_idx + 1..callee_idx + 1 + arg_count];
                     let entry = self.jit_functions.get(&target_ip);
                     let generic_value = entry.is_some_and(|entry| entry.generic_value);
@@ -1636,32 +1636,30 @@ impl<'gc> VM<'gc> {
                         && (generic_value || argument_values.iter().all(|value| matches!(value, Value::Number(_))))
                         && dependencies_match
                     {
-                        let (should_execute, call_count, function) = {
+                        let (call_count, function) = {
                             let Some(entry) = self.jit_functions.get_mut(&target_ip) else {
                                 unreachable!("JIT entry was found during dependency validation");
                             };
                             entry.calls = entry.calls.saturating_add(1);
-                            (self.jit_required || entry.calls >= 2, entry.calls, entry.function)
+                            (entry.calls, entry.function)
                         };
-                        if should_execute {
-                            if call_count == 2 {
-                                log::debug!("JIT activated for function at bytecode offset {target_ip}");
-                            }
-                            if self.execute_native_jit_call(
-                                ctx,
-                                callee_idx,
-                                arg_count,
-                                function,
-                                NativeJitCallOptions {
-                                    generic_value,
-                                    upvalues: &[],
-                                },
-                                false,
-                            )? {
-                                return Ok(OpcodeAction::Continue);
-                            }
-                            log::debug!("JIT deoptimized function at bytecode offset {target_ip}");
+                        if call_count == 1 {
+                            log::debug!("JIT activated for function at bytecode offset {target_ip}");
                         }
+                        if self.execute_native_jit_call(
+                            ctx,
+                            callee_idx,
+                            arg_count,
+                            function,
+                            NativeJitCallOptions {
+                                generic_value,
+                                upvalues: &[],
+                            },
+                            false,
+                        )? {
+                            return Ok(OpcodeAction::Continue);
+                        }
+                        log::debug!("JIT deoptimized function at bytecode offset {target_ip}");
                     }
                 }
                 self.push_or_replace_call_frame_for_function(
@@ -1682,7 +1680,6 @@ impl<'gc> VM<'gc> {
             }
             Value::Closure(target_ip, arity, ref upvals) => {
                 if !is_method
-                    && !is_tail_call
                     && arg_count == arity as usize
                     && let Some(entry) = self.jit_functions.get(&target_ip)
                 {
@@ -1699,33 +1696,31 @@ impl<'gc> VM<'gc> {
                             && captured_values.iter().all(|value| matches!(value, Value::Number(_)))
                             && (generic_value || argument_values.iter().all(|value| matches!(value, Value::Number(_))))
                         {
-                            let (should_execute, call_count) = {
+                            let call_count = {
                                 let entry = self
                                     .jit_functions
                                     .get_mut(&target_ip)
                                     .expect("JIT entry remained registered during validation");
                                 entry.calls = entry.calls.saturating_add(1);
-                                (self.jit_required || entry.calls >= 2, entry.calls)
+                                entry.calls
                             };
-                            if should_execute {
-                                if call_count == 2 {
-                                    log::debug!("JIT activated for closure at bytecode offset {target_ip}");
-                                }
-                                if self.execute_native_jit_call(
-                                    ctx,
-                                    callee_idx,
-                                    arg_count,
-                                    function,
-                                    NativeJitCallOptions {
-                                        generic_value,
-                                        upvalues: captured_cells,
-                                    },
-                                    false,
-                                )? {
-                                    return Ok(OpcodeAction::Continue);
-                                }
-                                log::debug!("JIT deoptimized closure at bytecode offset {target_ip}");
+                            if call_count == 1 {
+                                log::debug!("JIT activated for closure at bytecode offset {target_ip}");
                             }
+                            if self.execute_native_jit_call(
+                                ctx,
+                                callee_idx,
+                                arg_count,
+                                function,
+                                NativeJitCallOptions {
+                                    generic_value,
+                                    upvalues: captured_cells,
+                                },
+                                false,
+                            )? {
+                                return Ok(OpcodeAction::Continue);
+                            }
+                            log::debug!("JIT deoptimized closure at bytecode offset {target_ip}");
                         }
                     }
                 }

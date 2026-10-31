@@ -149,6 +149,66 @@ unsafe extern "C" fn js_fmod(left: f64, right: f64) -> f64 {
     left % right
 }
 
+fn emit_numeric_remainder(
+    builder: &mut FunctionBuilder<'_>,
+    fmod_function: FuncRef,
+    left: cranelift_codegen::ir::Value,
+    right: cranelift_codegen::ir::Value,
+) -> cranelift_codegen::ir::Value {
+    let left_integer = builder.ins().fcvt_to_sint_sat(types::I64, left);
+    let right_integer = builder.ins().fcvt_to_sint_sat(types::I64, right);
+    let left_roundtrip = builder.ins().fcvt_from_sint(types::F64, left_integer);
+    let right_roundtrip = builder.ins().fcvt_from_sint(types::F64, right_integer);
+    let left_exact = builder.ins().fcmp(FloatCC::Equal, left, left_roundtrip);
+    let right_exact = builder.ins().fcmp(FloatCC::Equal, right, right_roundtrip);
+    let exact = builder.ins().band(left_exact, right_exact);
+    // i64::MAX rounds to 2^63 as f64, so roundtripping alone misses saturation.
+    let upper_bound = builder.ins().f64const(9223372036854775808.0);
+    let left_in_range = builder.ins().fcmp(FloatCC::LessThan, left, upper_bound);
+    let right_in_range = builder.ins().fcmp(FloatCC::LessThan, right, upper_bound);
+    let in_range = builder.ins().band(left_in_range, right_in_range);
+    let exact = builder.ins().band(exact, in_range);
+    let nonzero = builder.ins().icmp_imm_s(IntCC::NotEqual, right_integer, 0);
+    // Excluding i64::MIN also excludes the only overflowing signed remainder.
+    let not_minimum = builder.ins().icmp_imm_s(IntCC::NotEqual, left_integer, i64::MIN);
+    let safe_divisor = builder.ins().band(nonzero, not_minimum);
+    let use_integer = builder.ins().band(exact, safe_divisor);
+    let integer_block = builder.create_block();
+    let fallback_block = builder.create_block();
+    let merge_block = builder.create_block();
+    builder.append_block_param(merge_block, types::F64);
+    builder.ins().brif(use_integer, integer_block, &[], fallback_block, &[]);
+    builder.switch_to_block(integer_block);
+    let left_narrow = builder.ins().ireduce(types::I32, left_integer);
+    let right_narrow = builder.ins().ireduce(types::I32, right_integer);
+    let left_extended = builder.ins().sextend(types::I64, left_narrow);
+    let right_extended = builder.ins().sextend(types::I64, right_narrow);
+    let left_fits = builder.ins().icmp(IntCC::Equal, left_extended, left_integer);
+    let right_fits = builder.ins().icmp(IntCC::Equal, right_extended, right_integer);
+    let both_fit = builder.ins().band(left_fits, right_fits);
+    let not_minimum = builder.ins().icmp_imm_s(IntCC::NotEqual, left_narrow, i32::MIN as i64);
+    let use_narrow = builder.ins().band(both_fit, not_minimum);
+    let narrow_block = builder.create_block();
+    let wide_block = builder.create_block();
+    builder.ins().brif(use_narrow, narrow_block, &[], wide_block, &[]);
+    builder.switch_to_block(narrow_block);
+    let remainder = builder.ins().srem(left_narrow, right_narrow);
+    let result = builder.ins().fcvt_from_sint(types::F64, remainder);
+    let result = builder.ins().fcopysign(result, left);
+    builder.ins().jump(merge_block, &[BlockArg::Value(result)]);
+    builder.switch_to_block(wide_block);
+    let remainder = builder.ins().srem(left_integer, right_integer);
+    let result = builder.ins().fcvt_from_sint(types::F64, remainder);
+    let result = builder.ins().fcopysign(result, left);
+    builder.ins().jump(merge_block, &[BlockArg::Value(result)]);
+    builder.switch_to_block(fallback_block);
+    let call = builder.ins().call(fmod_function, &[left, right]);
+    let result = builder.inst_results(call)[0];
+    builder.ins().jump(merge_block, &[BlockArg::Value(result)]);
+    builder.switch_to_block(merge_block);
+    builder.block_params(merge_block)[0]
+}
+
 unsafe extern "C" fn js_pow(base: f64, exponent: f64) -> f64 {
     crate::core::vm::number_pow(base, exponent)
 }
@@ -297,6 +357,10 @@ unsafe extern "C" fn js_math_builtin(arguments: *const f64, length: usize, id: u
 }
 
 fn native_builder() -> Result<JITBuilder, String> {
+    native_builder_with_optimization("none")
+}
+
+fn native_builder_with_optimization(opt_level: &str) -> Result<JITBuilder, String> {
     if !cfg!(all(
         target_pointer_width = "64",
         any(target_arch = "x86_64", target_arch = "aarch64")
@@ -305,6 +369,7 @@ fn native_builder() -> Result<JITBuilder, String> {
     }
 
     let mut flag_builder = settings::builder();
+    flag_builder.set("opt_level", opt_level).map_err(|error| error.to_string())?;
     flag_builder
         .set("use_colocated_libcalls", "false")
         .map_err(|error| error.to_string())?;
@@ -321,7 +386,7 @@ fn native_builder() -> Result<JITBuilder, String> {
 
 impl JitEngine {
     pub(crate) fn new() -> Result<Self, String> {
-        let mut builder = native_builder()?;
+        let mut builder = native_builder_with_optimization("speed")?;
         builder.symbol("javascript_jit_fmod", js_fmod as *const u8);
         builder.symbol("javascript_jit_pow", js_pow as *const u8);
         builder.symbol("javascript_jit_bitwise", js_bitwise_binary as *const u8);
@@ -1236,10 +1301,7 @@ impl JitEngine {
                                 Opcode::Sub => builder.ins().fsub(left, right),
                                 Opcode::Mul => builder.ins().fmul(left, right),
                                 Opcode::Div => builder.ins().fdiv(left, right),
-                                Opcode::Mod => {
-                                    let call = builder.ins().call(fmod_function, &[left, right]);
-                                    builder.inst_results(call)[0]
-                                }
+                                Opcode::Mod => emit_numeric_remainder(&mut builder, fmod_function, left, right),
                                 Opcode::Pow => {
                                     let call = builder.ins().call(pow_function, &[left, right]);
                                     builder.inst_results(call)[0]
@@ -1745,7 +1807,7 @@ fn collect_inline_dependencies_from_statement(
                 collect_inline_dependencies_from_expression(initializer, inline_functions, dependencies);
             }
         }
-        StatementKind::Assign(_, expression) | StatementKind::Expr(expression) => {
+        StatementKind::Assign(_, expression) | StatementKind::Expr(expression) | StatementKind::Return(Some(expression)) => {
             collect_inline_dependencies_from_expression(expression, inline_functions, dependencies);
         }
         StatementKind::If(if_statement) => {
@@ -2842,10 +2904,7 @@ impl FunctionCompiler<'_, '_> {
                     BinaryOp::Sub => JitValue::Number(self.builder.ins().fsub(left, right)),
                     BinaryOp::Mul => JitValue::Number(self.builder.ins().fmul(left, right)),
                     BinaryOp::Div => JitValue::Number(self.builder.ins().fdiv(left, right)),
-                    BinaryOp::Mod => {
-                        let call = self.builder.ins().call(self.fmod_function, &[left, right]);
-                        JitValue::Number(self.builder.inst_results(call)[0])
-                    }
+                    BinaryOp::Mod => JitValue::Number(emit_numeric_remainder(self.builder, self.fmod_function, left, right)),
                     BinaryOp::Pow => {
                         let call = self.builder.ins().call(self.pow_function, &[left, right]);
                         JitValue::Number(self.builder.inst_results(call)[0])
@@ -2888,8 +2947,12 @@ impl FunctionCompiler<'_, '_> {
                 let JitValue::Number(right) = self.compile_expression(right)? else {
                     return Err("numeric operands required".to_string());
                 };
-                let call = self.builder.ins().call(self.fmod_function, &[left, right]);
-                Ok(JitValue::Number(self.builder.inst_results(call)[0]))
+                Ok(JitValue::Number(emit_numeric_remainder(
+                    self.builder,
+                    self.fmod_function,
+                    left,
+                    right,
+                )))
             }
             Expr::Pow(left, right) => {
                 let JitValue::Number(left) = self.compile_expression(left)? else {
@@ -2938,10 +3001,7 @@ impl FunctionCompiler<'_, '_> {
                     Expr::SubAssign(..) => self.builder.ins().fsub(current, right),
                     Expr::MulAssign(..) => self.builder.ins().fmul(current, right),
                     Expr::DivAssign(..) => self.builder.ins().fdiv(current, right),
-                    Expr::ModAssign(..) => {
-                        let call = self.builder.ins().call(self.fmod_function, &[current, right]);
-                        self.builder.inst_results(call)[0]
-                    }
+                    Expr::ModAssign(..) => emit_numeric_remainder(self.builder, self.fmod_function, current, right),
                     _ => unreachable!(),
                 };
                 self.write_lvalue(&target, value);
@@ -2975,6 +3035,43 @@ impl FunctionCompiler<'_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn numeric_remainder_emits_guarded_integer_instructions_and_one_float_fallback() {
+        let mut engine = JitEngine::new().unwrap();
+        let mut context = engine.module.make_context();
+        context.func.signature.params = vec![AbiParam::new(types::F64), AbiParam::new(types::F64)];
+        context.func.signature.returns = vec![AbiParam::new(types::F64)];
+        let fmod_function = engine.module.declare_func_in_func(engine.fmod_function, &mut context.func);
+        let mut builder_context = FunctionBuilderContext::new();
+        {
+            let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_context);
+            let entry = builder.create_block();
+            builder.switch_to_block(entry);
+            builder.append_block_params_for_function_params(entry);
+            let left = builder.block_params(entry)[0];
+            let right = builder.block_params(entry)[1];
+            let result = emit_numeric_remainder(&mut builder, fmod_function, left, right);
+            builder.ins().return_(&[result]);
+            builder.seal_all_blocks();
+            builder.finalize(engine.module.target_config());
+        }
+        let mut remainders = Vec::new();
+        let mut calls = 0;
+        for block in context.func.layout.blocks() {
+            for instruction in context.func.layout.block_insts(block) {
+                match context.func.dfg.insts[instruction].opcode() {
+                    cranelift_codegen::ir::Opcode::Srem => {
+                        remainders.push(context.func.dfg.value_type(context.func.dfg.inst_results(instruction)[0]));
+                    }
+                    cranelift_codegen::ir::Opcode::Call => calls += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(remainders, [types::I32, types::I64]);
+        assert_eq!(calls, 1);
+    }
 
     #[test]
     fn bytecode_lowerer_compiles_and_executes_numeric_addition() {

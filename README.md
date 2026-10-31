@@ -122,10 +122,22 @@ ordinary function declarations that use numeric parameters and supported local
 arithmetic, comparisons, and `for` loops. Straight-line numeric functions also
 have a direct bytecode-to-Cranelift path for constants, parameter locals,
 arithmetic, and numeric returns. Other eligible functions still use the
-restricted AST backend. The generated function is used after its second call
-when all arguments are numbers. Unsupported functions, methods, closures, and
-calls with non-numeric arguments continue to use the interpreter. This is an
+restricted AST backend. Already compiled functions are used on their first
+eligible call, after checking argument types, captured values, and dependencies;
+ordinary mode does not first interpret a complete warmup invocation. This
+optimizing tier enables Cranelift's speed optimizations, while cold baseline
+templates retain the cheaper unoptimized compilation policy. Unsupported
+functions, methods, closures, and calls with unsupported argument types continue
+to use the interpreter. This is an
 experimental MVP, not a general-purpose optimizing JavaScript JIT.
+
+Direct and tail-position calls share the same guarded native entry; native
+tail-call results still flow through the caller's normal return and cleanup
+bytecode. Numeric remainder
+uses guarded integer division for exactly representable signed integers, with
+32-bit and 64-bit paths and sign-preserving zero results. Fractional operands,
+non-finite values, zero divisors, and conversion/overflow boundaries retain the
+floating-point helper, rather than approximating `%` using floating subtraction.
 
 For JIT tests, call `JsRuntime::set_jit_required(true)` to require both top-level
 script bytecode and JavaScript function bodies to enter compiled code. Eligible
@@ -444,7 +456,12 @@ cargo build --release --example js-rs --all-features
 python benches/compare_engines.py --js-rs target/release/examples/js-rs --compare-jit
 ```
 
-Ordinary mode already optimizes eligible hot numeric functions. Required-JIT
+Add `--report-warmup` to show the first in-process invocation of each workload
+separately. Those invocations are included in process time but excluded from the
+timed kernel; `--warmup` instead controls discarded whole-process launches. Do
+not attribute their execution cost to startup or compilation.
+
+Ordinary mode already executes precompiled eligible numeric functions. Required-JIT
 mode additionally compiles cold script and function paths that ordinary mode
 interprets. The helper-backed baseline adds compilation and per-opcode helper
 costs, so Test262 throughput can be lower even when all tests pass. Conformance

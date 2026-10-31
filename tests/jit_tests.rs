@@ -23,6 +23,174 @@ fn assert_baseline_matches(source: &str, expected: JsValue) {
 }
 
 #[test]
+fn jit_ordinary_mode_uses_precompiled_functions_on_the_first_eligible_call() {
+    let mut runtime = JsRuntime::new();
+    assert_eq!(
+        runtime.eval("function sum(a, b) { return a + b; } sum(20, 22);").unwrap(),
+        JsValue::Number(42.0)
+    );
+    assert_eq!(runtime.jit_stats().optimized_calls, 1);
+    assert!(runtime.jit_stats().interpreter_opcodes > 0);
+    assert_eq!(
+        runtime.eval("sum('hello', ' world');").unwrap(),
+        JsValue::String("hello world".into())
+    );
+    assert_eq!(runtime.eval("sum(3n, 4n);").unwrap(), JsValue::BigInt(7.into()));
+}
+
+#[test]
+fn jit_first_call_preserves_inlined_return_dependencies_and_captured_writes() {
+    for required in [false, true] {
+        let mut runtime = JsRuntime::new();
+        runtime.set_jit_required(required);
+        assert_eq!(
+            runtime
+                .eval(
+                    "function absolute(value) { return Math.abs(value); } \
+                     function wrapped(value) { return absolute(value); } \
+                     Math.abs = value => 17; wrapped(-3);",
+                )
+                .unwrap(),
+            JsValue::Number(17.0)
+        );
+        let before = runtime.jit_stats().optimized_calls;
+        assert_eq!(
+            runtime
+                .eval(
+                    "function make(n) { const update = function(v) { n += v; return n; }; return update; } \
+                     const add = make(3); add(4);",
+                )
+                .unwrap(),
+            JsValue::Number(7.0)
+        );
+        assert!(runtime.jit_stats().optimized_calls > before);
+        assert_eq!(runtime.eval("add(2);").unwrap(), JsValue::Number(9.0));
+    }
+}
+
+#[test]
+fn jit_tail_calls_enter_native_functions_without_bypassing_the_callers_return() {
+    for required in [false, true] {
+        let mut runtime = JsRuntime::new();
+        runtime.set_jit_required(required);
+        assert_eq!(
+            runtime
+                .eval(
+                    "function sum(a, b) { return a + b; } \
+                 function wrapper(a, b) { if (arguments.length !== 2) throw 17; return sum(a, b); } \
+                 const answer = wrapper(20, 22); answer;"
+                )
+                .unwrap(),
+            JsValue::Number(42.0)
+        );
+        assert_eq!(runtime.jit_stats().optimized_calls, 1);
+        assert_eq!(runtime.eval("wrapper('a', 'b');").unwrap(), JsValue::String("ab".into()));
+        assert_eq!(
+            runtime
+                .eval("sum = function(a, b) { throw 37; }; try { wrapper(1, 2); } catch (e) { e; }")
+                .unwrap(),
+            JsValue::Number(37.0)
+        );
+    }
+}
+
+#[test]
+fn jit_tail_called_closures_commit_captures_and_preserve_finally() {
+    for required in [false, true] {
+        let mut runtime = JsRuntime::new();
+        runtime.set_jit_required(required);
+        assert_eq!(
+            runtime.eval(
+                "function make(start) { let captured = start; const tick = function() { captured = captured + 1; return captured; }; return tick; } \
+                 const increment = make(40); \
+                 function wrapper() { if (arguments.length) throw 17; return increment(); } \
+                 const first = wrapper(); first;"
+            ).unwrap(),
+            JsValue::Number(41.0)
+        );
+        assert!(runtime.jit_stats().optimized_calls > 0);
+        assert_eq!(
+            runtime
+                .eval(
+                    "let cleanup = 0; function finalizer() { try { return wrapper(); } finally { cleanup++; } } \
+                          const next = finalizer(); next + cleanup;"
+                )
+                .unwrap(),
+            JsValue::Number(43.0)
+        );
+    }
+}
+
+#[test]
+fn jit_native_tail_calls_preserve_opaque_identity_and_throwing_capture_updates() {
+    for required in [false, true] {
+        let mut runtime = JsRuntime::new();
+        runtime.set_jit_required(required);
+        assert_eq!(
+            runtime
+                .eval(
+                    "function identity(value) { return value; } \
+                     function wrapper(value) { if (arguments.length !== 1) throw 17; return identity(value); } \
+                     const sentinel = { nested: [1, 2, 3] }; const result = wrapper(sentinel); result === sentinel;",
+                )
+                .unwrap(),
+            JsValue::Boolean(true)
+        );
+        assert_eq!(runtime.jit_stats().optimized_calls, 1);
+        assert_eq!(runtime.eval("result.nested === sentinel.nested;").unwrap(), JsValue::Boolean(true));
+        let before = runtime.jit_stats().optimized_calls;
+        assert_eq!(
+            runtime
+                .eval(
+                    "function makeCounter() { \
+                         let count = 40; \
+                         const tick = function(flag) { count = count + 1; if (flag) throw count; return count; }; \
+                         return tick; \
+                     } \
+                     const counter = makeCounter(); \
+                     function invoke(flag) { if (arguments.length !== 1) throw 17; return counter(flag); } \
+                     let caught = 0; try { invoke(1); } catch (error) { caught = error; } \
+                     const next = invoke(0); next + caught;",
+                )
+                .unwrap(),
+            JsValue::Number(83.0)
+        );
+        assert_eq!(runtime.jit_stats().optimized_calls - before, 2);
+    }
+}
+
+#[test]
+fn jit_integer_remainder_matches_number_semantics_at_conversion_boundaries() {
+    let source = "
+        function remainder(a, b) { return a % b; }
+        function compound(a, b) { a %= b; return a; }
+        function loopRemainder(a, b) { let result = 0; for (let i = 0; i < 1; i++) result = a % b; return result; }
+        const values = [0, -0, 1, -1, 7, -7, 0.5, -0.5, 97, 2147483648,
+                        2147483647, -2147483648, -2147483649, -2147483647,
+                        9007199254740991, 9007199254740992, 9223372036854774784,
+                        9223372036854775808, -9223372036854775808,
+                        -9223372036854777856, 1e100, -1e100, 1e-300, -1e-300,
+                        Infinity, -Infinity, NaN];
+        let valid = true;
+        for (const a of values) {
+            for (const b of values) {
+                const expected = a % b;
+                if (!Object.is(remainder(a, b), expected)
+                    || !Object.is(compound(a, b), expected)
+                    || !Object.is(loopRemainder(a, b), expected)) valid = false;
+            }
+        }
+        valid;
+    ";
+    for required in [false, true] {
+        let mut runtime = JsRuntime::new();
+        runtime.set_jit_required(required);
+        assert_eq!(runtime.eval(source).unwrap(), JsValue::Boolean(true));
+        assert!(runtime.jit_stats().optimized_calls >= 27 * 27 * 3);
+    }
+}
+
+#[test]
 fn jit_required_script_evaluation_uses_the_native_path() {
     let result = evaluate_script_with_jit_required(
         "function twice(value) { return value * 2; } twice(21);",

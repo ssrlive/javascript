@@ -68,7 +68,9 @@ function numericRegions(n) {
 }
 
 function measure(name, workload) {
+    const warmupStart = Date.now();
     workload(ITERATIONS);
+    const warmupElapsed = Date.now() - warmupStart;
     let checksum = 0;
     const start = Date.now();
     for (let round = 0; round < MEASURE_ROUNDS; round++) {
@@ -76,6 +78,7 @@ function measure(name, workload) {
     }
     const elapsed = Date.now() - start;
     console.log("BENCH_RESULT:" + name + ":" + checksum + ":" + elapsed);
+    console.log("BENCH_WARMUP:" + name + ":" + warmupElapsed);
 }
 
 measure("arithmetic", arithmetic);
@@ -121,7 +124,7 @@ def run_engine(
     script_path: Path,
     timeout: float,
     extra_args: tuple[str, ...] = (),
-) -> tuple[dict[str, tuple[str, int]], float]:
+) -> tuple[dict[str, tuple[str, int]], float, dict[str, int]]:
     start = time.perf_counter()
     try:
         result = subprocess.run(
@@ -147,7 +150,13 @@ def run_engine(
             f"{executable} did not emit all benchmark results; "
             f"expected {', '.join(SUITES)}. stdout: {result.stdout!r}"
         )
-    return results, wall_ms
+    warmups = {
+        name: int(elapsed)
+        for name, elapsed in re.findall(r"^BENCH_WARMUP:([^:]+):(\d+)$", result.stdout, re.MULTILINE)
+    }
+    if set(warmups) != set(SUITES):
+        raise RuntimeError(f"{executable} did not emit all first-invocation timings. stdout: {result.stdout!r}")
+    return results, wall_ms, warmups
 
 
 def median(values: list[float]) -> float:
@@ -169,6 +178,7 @@ def main() -> int:
     parser.add_argument("--iterations", type=positive_int, default=100_000, help="iterations per workload round")
     parser.add_argument("--timeout", type=positive_int, default=120, help="timeout in seconds per process launch")
     parser.add_argument("--compare-jit", action="store_true", help="also measure required JIT against ordinary js-rs")
+    parser.add_argument("--report-warmup", action="store_true", help="also report first in-process workload invocations")
     args = parser.parse_args()
 
     try:
@@ -187,6 +197,9 @@ def main() -> int:
             engine: {suite: [] for suite in SUITES} for engine in wall_times
         }
         checksums: dict[str, dict[str, str]] = {engine: {} for engine in wall_times}
+        warmup_times: dict[str, dict[str, list[float]]] = {
+            engine: {suite: [] for suite in SUITES} for engine in wall_times
+        }
 
         with tempfile.TemporaryDirectory(prefix="js-engine-bench-") as temp_dir:
             script_path = Path(temp_dir) / "benchmark.js"
@@ -194,15 +207,17 @@ def main() -> int:
 
             for _ in range(args.warmup):
                 for engine, executable, extra_args in commands:
-                    results, _ = run_engine(executable, script_path, args.timeout, extra_args)
+                    results, _, _ = run_engine(executable, script_path, args.timeout, extra_args)
                     for suite, (checksum, _) in results.items():
                         checksums[engine].setdefault(suite, checksum)
 
             for run_index in range(args.runs):
                 order = commands if run_index % 2 == 0 else tuple(reversed(commands))
                 for engine, executable, extra_args in order:
-                    results, wall_ms = run_engine(executable, script_path, args.timeout, extra_args)
+                    results, wall_ms, warmups = run_engine(executable, script_path, args.timeout, extra_args)
                     wall_times[engine].append(wall_ms)
+                    for suite, warmup_ms in warmups.items():
+                        warmup_times[engine][suite].append(float(warmup_ms))
                     for suite, (checksum, kernel_ms) in results.items():
                         expected = checksums[engine].setdefault(suite, checksum)
                         if checksum != expected:
@@ -230,6 +245,12 @@ def main() -> int:
         print(f"Node.js: {node_wall:.1f} ms")
         print(f"js-rs:   {js_rs_wall:.1f} ms")
         print(f"js-rs/Node: {format_ratio(js_rs_wall, node_wall)}")
+        if args.report_warmup:
+            print("\nMedian first workload invocation (included in process time, not the measured kernel)")
+            engines = list(wall_times)
+            print(f"{'workload':<18}" + "".join(f" {engine:>12}" for engine in engines))
+            for suite in SUITES:
+                print(f"{suite:<18}" + "".join(f" {median(warmup_times[engine][suite]):>9.1f} ms" for engine in engines))
         if args.compare_jit:
             print("\nRequired JIT vs ordinary js-rs (ratio > 1 means JIT is slower)")
             print(f"{'workload':<18} {'ordinary':>12} {'JIT':>12} {'JIT/ordinary':>14}")

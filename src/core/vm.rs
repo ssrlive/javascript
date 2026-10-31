@@ -35440,14 +35440,14 @@ impl<'gc> VM<'gc> {
                     return Value::Array(arr);
                 }
                 BUILTIN_STRING_INDEXOF => {
-                    let needle = match args.first() {
+                    let needle: std::borrow::Cow<'_, [u16]> = match args.first() {
+                        Some(Value::String(s)) => std::borrow::Cow::Borrowed(s),
                         Some(v) => match self.vm_coerce_arg_to_string(ctx, v) {
-                            Some(s) => s,
+                            Some(s) => std::borrow::Cow::Owned(crate::unicode::utf8_to_utf16(&s)),
                             None => return Value::Undefined,
                         },
-                        None => "undefined".to_string(),
+                        None => std::borrow::Cow::Owned(crate::unicode::utf8_to_utf16("undefined")),
                     };
-                    let needle = crate::unicode::utf8_to_utf16(&needle);
                     let pos = if let Some(pos_val) = args.get(1) {
                         let n = match self.extract_number_with_coercion(ctx, pos_val) {
                             Some(n) => n,
@@ -35462,7 +35462,7 @@ impl<'gc> VM<'gc> {
                         return Value::Number(pos as f64);
                     }
                     // Work on UTF-16 code units
-                    return match s[pos..].windows(needle.len()).position(|w| w == needle.as_slice()) {
+                    return match s[pos..].windows(needle.len()).position(|w| w == needle.as_ref()) {
                         Some(off) => Value::Number((pos + off) as f64),
                         None => Value::Number(-1.0),
                     };

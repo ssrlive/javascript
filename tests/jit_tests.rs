@@ -1050,6 +1050,25 @@ fn jit_ordinary_data_properties_preserve_globals_fields_and_prototype_changes() 
 }
 
 #[test]
+fn jit_string_index_of_borrows_primitive_utf16_and_coerces_objects() {
+    let source = r#"
+        let calls = 0;
+        const needle = {toString() { calls++; return "x"; }};
+        const text = "\uD800x";
+        [text.indexOf("\uD800"), text.indexOf(needle), calls].join("|");
+    "#;
+    let expected = JsValue::String("0|1|1".into());
+    for required in [false, true] {
+        let mut runtime = JsRuntime::new();
+        runtime.set_jit_required(required);
+        assert_eq!(runtime.eval(source).unwrap(), expected);
+        if required {
+            assert_no_interpreter(&mut runtime);
+        }
+    }
+}
+
+#[test]
 fn jit_numeric_collection_hints_preserve_mutation_order_and_same_value_zero() {
     let source = "
         const map = new Map();

@@ -177,6 +177,9 @@ only for operations that require it. Boxed/coercible receivers still use owned
 input snapshots before argument coercion or callbacks; code-unit operations
 such as `slice` and `charCodeAt` keep the original UTF-16 input. This reduces
 helper allocations without native String loop lowering.
+`String.indexOf` also borrows primitive UTF-16 needles directly, preserving
+lone surrogates and avoiding a UTF-16/UTF-8 round trip; non-string arguments
+still follow normal `ToString` coercion.
 Ordinary object assignments can also update existing own writable data slots
 directly when the receiver is unchanged and the property is neither private nor
 `__proto__`. Read-only properties, proxies, integrity flags and setter paths

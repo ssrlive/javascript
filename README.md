@@ -155,11 +155,12 @@ and unsupported argument types retain the existing rooted call protocol.
 
 Array `map`/`reduce` read verified ordinary dense own elements directly and
 recheck the live array on every iteration. Holes, accessors, TypedArrays and
-callback mutations retain generic lookup. Creating data properties in existing
-ordinary array slots can also bypass descriptor-object construction when the
-slot is unrestricted; species still executes normally, and proxies, integrity
-restrictions and existing descriptors retain generic definitions. These are
-helper optimizations, not native Array loop lowering.
+callback mutations retain generic lookup. `map` result writes use the numeric
+index directly for verified in-bounds backing slots, avoiding property-key
+parsing and descriptor-object construction; holes, accessors, TypedArrays,
+proxies, integrity restrictions and existing descriptors retain generic
+definitions. Species still executes normally. These are helper optimizations,
+not native Array loop lowering.
 `Array.pop` can remove a verified ordinary dense tail directly, including arrays
 with writable length descriptors and unrelated named properties. Each call
 checks the live logical length, tail presence and descriptors, and length

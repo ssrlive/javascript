@@ -33542,10 +33542,10 @@ impl<'gc> VM<'gc> {
             let len = len_u64 as usize;
 
             for index in 0..len {
-                let key = index.to_string();
                 let element = if let Some(element) = self.ordinary_dense_array_element(&target, index) {
                     element
                 } else {
+                    let key = index.to_string();
                     if is_typed_array && !self.in_typed_array_method {
                         if let Value::Array(arr) = &target {
                             self.maybe_sync_resizable_ta(ctx, arr);
@@ -33581,7 +33581,7 @@ impl<'gc> VM<'gc> {
                             return Value::Undefined;
                         }
                     };
-                if let Err(err) = self.create_data_property_or_throw(ctx, &result, &key, &mapped) {
+                if let Err(err) = self.create_data_property_or_throw_index(ctx, &result, index, &mapped) {
                     self.set_pending_throw_from_error(&err);
                     return Value::Undefined;
                 }
@@ -43952,6 +43952,37 @@ impl<'gc> VM<'gc> {
         } else {
             Err(crate::raise_type_error!("Cannot define property"))
         }
+    }
+
+    fn create_data_property_or_throw_index(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        target: &Value<'gc>,
+        index: usize,
+        value: &Value<'gc>,
+    ) -> Result<(), JSError> {
+        if let Value::Array(array) = target
+            && index < u32::MAX as usize
+        {
+            let data = array.borrow();
+            let key = index.to_string();
+            if index < data.elements.len()
+                && (index as u64) < self.array_length_u64(&data)
+                && !data.props.contains_key("__typedarray_name__")
+                && !data.props.contains_key(&key)
+                && !matches!(data.props.get("__non_extensible__"), Some(Value::Boolean(true)))
+                && !matches!(data.props.get("__sealed__"), Some(Value::Boolean(true)))
+                && !matches!(data.props.get("__frozen__"), Some(Value::Boolean(true)))
+                && !matches!(data.elements[index], Value::Property { .. } | Value::Uninitialized)
+            {
+                drop(data);
+                let mut data = array.borrow_mut(ctx);
+                data.elements[index] = value.clone();
+                data.props.shift_remove(&format!("__deleted_{index}"));
+                return Ok(());
+            }
+        }
+        self.create_data_property_or_throw(ctx, target, &index.to_string(), value)
     }
 
     fn ordinary_dense_array_element(&self, target: &Value<'gc>, index: usize) -> Option<Value<'gc>> {

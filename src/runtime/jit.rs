@@ -26,6 +26,17 @@ pub(crate) struct JitEngine {
     next_function_id: u32,
 }
 
+fn function_entries(chunk: &Chunk<'_>) -> HashMap<usize, usize> {
+    chunk
+        .constants
+        .iter()
+        .filter_map(|value| match value {
+            crate::core::Value::Function(ip, arity) | crate::core::Value::Closure(ip, arity, _) => Some((*ip, *arity as usize)),
+            _ => None,
+        })
+        .collect()
+}
+
 fn is_local_slot_initializer(
     instructions: &[bytecode::DecodedInstruction],
     instruction_index: usize,
@@ -534,6 +545,23 @@ impl JitEngine {
             });
         }
 
+        for (ip, arity) in function_entries(chunk) {
+            if chunk.fn_names.contains_key(&ip)
+                || chunk.async_function_ips.contains(&ip)
+                || chunk.generator_function_ips.contains(&ip)
+                || chunk.class_constructor_ips.contains(&ip)
+            {
+                continue;
+            }
+            candidates.push(FunctionCandidate {
+                ip,
+                name: format!("anonymous_{ip}"),
+                params: (0..arity).map(|index| format!("argument_{index}")).collect(),
+                body: &[],
+                dependencies: Vec::new(),
+            });
+        }
+
         let mut compiled = Vec::new();
         for candidate in candidates {
             let generic_value = is_identity_function(&candidate.params, candidate.body);
@@ -681,16 +709,17 @@ impl JitEngine {
                     .map(|instruction| instruction.offset)
             })
             .collect::<HashSet<_>>();
-        let other_function_entries = chunk
-            .fn_names
+        let entries = function_entries(chunk);
+        let other_function_entries = entries
             .keys()
+            .chain(chunk.fn_names.keys())
             .copied()
             .filter(|entry| *entry != candidate.ip)
             .collect::<HashSet<_>>();
         let mut incoming_stacks = vec![None::<Vec<BytecodeStackKind>>; cfg.blocks.len()];
-        let function_end = chunk
-            .fn_names
+        let function_end = entries
             .keys()
+            .chain(chunk.fn_names.keys())
             .copied()
             .filter(|entry| *entry > candidate.ip)
             .min()

@@ -7,6 +7,60 @@ const FUNCTION_ID_SOURCE: &str = include_str!("../src/core/function_id.rs");
 const BASELINE_SOURCE: &str = include_str!("../src/core/vm/runner.rs");
 const UNCOVERED_BASELINE_OPCODES: &[&str] = &["DisposeResources", "DisposeResourcesAsync"];
 const BASELINE_SEMANTIC_TESTS: &[(&str, &[&str])] = &[
+    (
+        "jit_direct_numeric_callbacks_preserve_throw_boundaries_and_unused_arguments",
+        &["Call", "Throw"],
+    ),
+    (
+        "jit_array_callback_elements_observe_live_mutations_and_species",
+        &["Call", "GetIndex", "SetIndex"],
+    ),
+    (
+        "jit_numeric_calls_preserve_many_arguments_captures_and_errors",
+        &["Call", "GetUpvalue", "SetUpvalue"],
+    ),
+    ("jit_array_mutations_preserve_descriptors_prototypes_and_partial_effects", &["Call"]),
+    ("jit_dense_pop_preserves_length_descriptors_and_tail_identity", &["Call"]),
+    ("jit_shared_regexp_matchers_preserve_live_state_captures_and_reentrancy", &["Call"]),
+    (
+        "jit_native_bitwise_loops_match_conversion_and_shift_semantics",
+        &[
+            "BitwiseAnd",
+            "BitwiseOr",
+            "BitwiseXor",
+            "ShiftLeft",
+            "ShiftRight",
+            "UnsignedShiftRight",
+        ],
+    ),
+    (
+        "jit_native_uint32_loops_preserve_aliases_offsets_and_assignment_results",
+        &[
+            "GetIndex",
+            "SetIndex",
+            "BitwiseAnd",
+            "UnsignedShiftRight",
+            "GetLocal",
+            "ClearLocalCells",
+        ],
+    ),
+    (
+        "jit_native_uint32_loops_commit_before_each_gc_slice",
+        &["Jump", "JumpIfFalse", "ReboxLocal"],
+    ),
+    (
+        "jit_numeric_collection_hints_preserve_mutation_order_and_same_value_zero",
+        &["Call"],
+    ),
+    (
+        "jit_numeric_index_fastpaths_preserve_array_holes_accessors_and_proxy_receivers",
+        &["GetIndex"],
+    ),
+    (
+        "jit_typed_numeric_index_fastpaths_preserve_keys_coercion_and_aliasing",
+        &["GetIndex", "SetIndex"],
+    ),
+    ("jit_builtin_callbacks_use_guarded_native_entries_with_extra_arguments", &["Call"]),
     ("jit_integer_remainder_matches_number_semantics_at_conversion_boundaries", &["Mod"]),
     (
         "jit_tail_calls_enter_native_functions_without_bypassing_the_callers_return",

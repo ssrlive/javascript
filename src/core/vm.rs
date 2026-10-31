@@ -913,6 +913,7 @@ pub struct VM<'gc> {
     #[cfg(feature = "jit")]
     jit_stats: crate::runtime::JitStats,
     jit_roots: Vec<Value<'gc>>,
+    collection_lookup_hints: RefCell<HashMap<(usize, u64), usize>>,
     stop_requested: bool,
     // Property storage for Function values, keyed by function IP
     fn_props: HashMap<usize, ObjectHandle<'gc>>,
@@ -1341,6 +1342,7 @@ impl<'gc> VM<'gc> {
             #[cfg(feature = "jit")]
             jit_stats: crate::runtime::JitStats::default(),
             jit_roots: Vec::new(),
+            collection_lookup_hints: RefCell::new(HashMap::new()),
             stop_requested: false,
             fn_props: HashMap::new(),
             fn_realm: HashMap::new(),
@@ -15562,62 +15564,7 @@ impl<'gc> VM<'gc> {
                     return self.assign_named_property(ctx, recv_val, key, val, None);
                 }
 
-                // SameValue(O, Receiver) is true → IntegerIndexedElementSet
-                // Spec order: coerce value first (may trigger resize), then check bounds
-                let idx = numeric_index as usize;
-                let ta_name = arr
-                    .borrow()
-                    .props
-                    .get("__typedarray_name__")
-                    .map(|v| value_to_string(v))
-                    .unwrap_or_default();
-                if is_bigint_typed_array(&ta_name) {
-                    let bi = match self.value_to_bigint(ctx, val) {
-                        Some(b) => b,
-                        None => return Ok(val.clone()),
-                    };
-                    if self.pending_throw.is_some() {
-                        return Ok(val.clone());
-                    }
-                    // Re-check bounds after coercion (valueOf may have resized buffer)
-                    self.sync_resizable_ta_length(ctx, arr);
-                    let valid_after_coerce = Self::is_valid_integer_index(arr, numeric_index);
-                    if !valid_after_coerce {
-                        return Ok(val.clone());
-                    }
-                    let coerced = coerce_bigint_for_ta(&bi, &ta_name);
-                    let coerced_val = Value::BigInt(Box::new(coerced));
-                    {
-                        let mut a = arr.borrow_mut(ctx);
-                        if idx < a.elements.len() {
-                            a.elements[idx] = coerced_val.clone();
-                        }
-                    }
-                    self.sync_ta_element_to_buffer(ctx, arr, idx, 0.0, &ta_name);
-                    return Ok(coerced_val);
-                }
-                let n = match self.extract_number_with_coercion(ctx, val) {
-                    Some(n) => n,
-                    None => return Ok(val.clone()),
-                };
-                if self.pending_throw.is_some() {
-                    return Ok(val.clone());
-                }
-                // Re-check bounds after coercion (valueOf may have resized buffer)
-                self.sync_resizable_ta_length(ctx, arr);
-                let valid_after_coerce = Self::is_valid_integer_index(arr, numeric_index);
-                if !valid_after_coerce {
-                    return Ok(val.clone());
-                }
-                let coerced = coerce_typed_array_value(n, &ta_name);
-                {
-                    let mut a = arr.borrow_mut(ctx);
-                    if idx < a.elements.len() {
-                        a.elements[idx] = Value::Number(coerced);
-                    }
-                }
-                self.sync_ta_element_to_buffer(ctx, arr, idx, n, &ta_name);
-                return Ok(Value::Number(coerced));
+                return Ok(self.set_typed_array_element(ctx, arr, numeric_index, val));
             }
 
             let should_be_elem_index = if is_ta {
@@ -16565,6 +16512,44 @@ impl<'gc> VM<'gc> {
                 Value::Undefined
             }
         }
+    }
+
+    fn set_typed_array_element(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        arr: &ArrayHandle<'gc>,
+        numeric_index: f64,
+        value: &Value<'gc>,
+    ) -> Value<'gc> {
+        let ta_name = arr
+            .borrow()
+            .props
+            .get("__typedarray_name__")
+            .map(value_to_string)
+            .expect("typed array element setter requires a typed array");
+        // Coercion precedes validity checks and may detach or resize the buffer.
+        let (coerced, number) = if is_bigint_typed_array(&ta_name) {
+            let Some(bigint) = self.value_to_bigint(ctx, value) else {
+                return value.clone();
+            };
+            (Value::BigInt(Box::new(coerce_bigint_for_ta(&bigint, &ta_name))), 0.0)
+        } else {
+            let Some(number) = self.extract_number_with_coercion(ctx, value) else {
+                return value.clone();
+            };
+            (Value::Number(coerce_typed_array_value(number, &ta_name)), number)
+        };
+        if self.pending_throw.is_some() {
+            return value.clone();
+        }
+        self.sync_resizable_ta_length(ctx, arr);
+        if !Self::is_valid_integer_index(arr, numeric_index) {
+            return value.clone();
+        }
+        let position = numeric_index as usize;
+        arr.borrow_mut(ctx).elements[position] = coerced.clone();
+        self.sync_ta_element_to_buffer(ctx, arr, position, number, &ta_name);
+        coerced
     }
 
     fn read_named_property_with_receiver(
@@ -32543,6 +32528,11 @@ impl<'gc> VM<'gc> {
             } else {
                 let mut found = None;
                 while k < len {
+                    if let Some(value) = self.ordinary_dense_array_element(&target, k) {
+                        found = Some(value);
+                        k += 1;
+                        break;
+                    }
                     let key = k.to_string();
                     let present = if is_typed_array && self.in_typed_array_method {
                         // TypedArray.prototype.reduce: no HasProperty, Get returns undefined for OOB
@@ -32582,43 +32572,50 @@ impl<'gc> VM<'gc> {
             };
 
             while k < len {
-                let key = k.to_string();
-                let present = if is_typed_array && self.in_typed_array_method {
-                    if let Value::Array(arr) = &target {
-                        self.maybe_sync_resizable_ta(ctx, arr);
-                    }
-                    true
-                } else if is_typed_array {
-                    if let Value::Array(arr) = &target {
-                        self.maybe_sync_resizable_ta(ctx, arr);
-                        k < arr.borrow().elements.len()
-                    } else {
-                        true
-                    }
+                let value = if let Some(value) = self.ordinary_dense_array_element(&target, k) {
+                    value
                 } else {
-                    match is_present(self, &target, &key, k) {
-                        Ok(v) => v,
-                        Err(v) => return v,
+                    let key = k.to_string();
+                    let present = if is_typed_array && self.in_typed_array_method {
+                        if let Value::Array(arr) = &target {
+                            self.maybe_sync_resizable_ta(ctx, arr);
+                        }
+                        true
+                    } else if is_typed_array {
+                        if let Value::Array(arr) = &target {
+                            self.maybe_sync_resizable_ta(ctx, arr);
+                            k < arr.borrow().elements.len()
+                        } else {
+                            true
+                        }
+                    } else {
+                        match is_present(self, &target, &key, k) {
+                            Ok(v) => v,
+                            Err(v) => return v,
+                        }
+                    };
+                    if !present {
+                        k += 1;
+                        continue;
                     }
-                };
-                if present {
                     let value = self.read_named_property(ctx, &target, &key);
                     if self.pending_throw.is_some() {
                         return Value::Undefined;
                     }
-                    accumulator = match self.vm_call_function_value(
-                        ctx,
-                        &callback,
-                        &Value::Undefined,
-                        &[accumulator, value, Value::Number(k as f64), target.clone()],
-                    ) {
-                        Ok(v) => v,
-                        Err(err) => {
-                            self.set_pending_throw_from_error(&err);
-                            return Value::Undefined;
-                        }
-                    };
-                }
+                    value
+                };
+                accumulator = match self.vm_call_function_value(
+                    ctx,
+                    &callback,
+                    &Value::Undefined,
+                    &[accumulator, value, Value::Number(k as f64), target.clone()],
+                ) {
+                    Ok(v) => v,
+                    Err(err) => {
+                        self.set_pending_throw_from_error(&err);
+                        return Value::Undefined;
+                    }
+                };
                 k += 1;
             }
 
@@ -33105,6 +33102,30 @@ impl<'gc> VM<'gc> {
         }
 
         if id == BUILTIN_ARRAY_POP {
+            if let Value::Array(array) = receiver {
+                let data = array.borrow();
+                let length = data.elements.len();
+                if length > 0 && self.array_length_u64(&data) == length as u64 {
+                    let index = length - 1;
+                    let key = index.to_string();
+                    if !data.props.contains_key("__typedarray_name__")
+                        && !data.props.contains_key(&key)
+                        && !data.props.contains_key(&format!("__deleted_{index}"))
+                        && !has_readonly_mark(&data.props, "length")
+                        && !has_getter(&data.props, "length")
+                        && !has_setter(&data.props, "length")
+                        && !matches!(data.props.get("__sealed__"), Some(Value::Boolean(true)))
+                        && !matches!(data.props.get("__frozen__"), Some(Value::Boolean(true)))
+                        && !matches!(data.elements[index], Value::Property { .. } | Value::Uninitialized)
+                    {
+                        drop(data);
+                        let mut data = array.borrow_mut(ctx);
+                        let value = data.elements.pop().expect("validated dense array tail");
+                        self.set_array_length_u64(&mut data, index as u64);
+                        return value;
+                    }
+                }
+            }
             let Some(target) = self.array_method_target_object(ctx, receiver) else {
                 return Value::Undefined;
             };
@@ -33496,31 +33517,36 @@ impl<'gc> VM<'gc> {
 
             for index in 0..len {
                 let key = index.to_string();
-                if is_typed_array && !self.in_typed_array_method {
-                    if let Value::Array(arr) = &target {
-                        self.maybe_sync_resizable_ta(ctx, arr);
-                        if index >= arr.borrow().elements.len() {
+                let element = if let Some(element) = self.ordinary_dense_array_element(&target, index) {
+                    element
+                } else {
+                    if is_typed_array && !self.in_typed_array_method {
+                        if let Value::Array(arr) = &target {
+                            self.maybe_sync_resizable_ta(ctx, arr);
+                            if index >= arr.borrow().elements.len() {
+                                continue;
+                            }
+                        }
+                    } else if is_typed_array {
+                        if let Value::Array(arr) = &target {
+                            self.maybe_sync_resizable_ta(ctx, arr);
+                        }
+                    } else {
+                        let present = match self.array_like_has_index(ctx, &target, &key, index) {
+                            Ok(v) => v,
+                            Err(v) => return v,
+                        };
+                        if !present {
                             continue;
                         }
                     }
-                } else if is_typed_array {
-                    if let Value::Array(arr) = &target {
-                        self.maybe_sync_resizable_ta(ctx, arr);
-                    }
-                } else {
-                    let present = match self.array_like_has_index(ctx, &target, &key, index) {
-                        Ok(v) => v,
-                        Err(v) => return v,
-                    };
-                    if !present {
-                        continue;
-                    }
-                }
 
-                let element = self.read_named_property(ctx, &target, &key);
-                if self.pending_throw.is_some() {
-                    return Value::Undefined;
-                }
+                    let element = self.read_named_property(ctx, &target, &key);
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    element
+                };
                 let mapped =
                     match self.vm_call_function_value(ctx, &callback, &this_arg, &[element, Value::Number(index as f64), target.clone()]) {
                         Ok(v) => v,
@@ -36342,8 +36368,8 @@ impl<'gc> VM<'gc> {
                         return receiver.clone();
                     }
                     // Update existing key or insert new
-                    if let Some(entry) = borrow.entries.iter_mut().find(|(k, _)| self.values_same_zero(k, &key)) {
-                        entry.1 = val;
+                    if let Some(position) = self.collection_entry_index(Gc::as_ptr(m) as usize, &borrow.entries, &key, |entry| &entry.0) {
+                        borrow.entries[position].1 = val;
                     } else {
                         borrow.entries.push((key, val));
                     }
@@ -36353,22 +36379,30 @@ impl<'gc> VM<'gc> {
                 BUILTIN_MAP_GET | BUILTIN_WEAKMAP_GET => {
                     let key = args.first().cloned().unwrap_or(Value::Undefined);
                     let borrow = m.borrow();
-                    let val = borrow
-                        .entries
-                        .iter()
-                        .find(|(k, _)| self.values_same_zero(k, &key))
-                        .map(|(_, v)| v.clone())
+                    let val = self
+                        .collection_entry_index(Gc::as_ptr(m) as usize, &borrow.entries, &key, |entry| &entry.0)
+                        .map(|position| borrow.entries[position].1.clone())
                         .unwrap_or(Value::Undefined);
                     return val;
                 }
                 BUILTIN_MAP_HAS | BUILTIN_WEAKMAP_HAS => {
                     let key = args.first().cloned().unwrap_or(Value::Undefined);
                     let borrow = m.borrow();
-                    return Value::Boolean(borrow.entries.iter().any(|(k, _)| self.values_same_zero(k, &key)));
+                    return Value::Boolean(
+                        self.collection_entry_index(Gc::as_ptr(m) as usize, &borrow.entries, &key, |entry| &entry.0)
+                            .is_some(),
+                    );
                 }
                 BUILTIN_MAP_DELETE | BUILTIN_WEAKMAP_DELETE => {
                     let key = args.first().cloned().unwrap_or(Value::Undefined);
                     let mut borrow = m.borrow_mut(ctx);
+                    if matches!(key, Value::Number(_)) {
+                        let position = self.collection_entry_index(Gc::as_ptr(m) as usize, &borrow.entries, &key, |entry| &entry.0);
+                        if let Some(position) = position {
+                            borrow.entries.remove(position);
+                        }
+                        return Value::Boolean(position.is_some());
+                    }
                     let len_before = borrow.entries.len();
                     borrow.entries.retain(|(k, _)| !self.values_same_zero(k, &key));
                     return Value::Boolean(borrow.entries.len() < len_before);
@@ -36621,7 +36655,10 @@ impl<'gc> VM<'gc> {
                         drop(borrow);
                         return receiver.clone();
                     }
-                    if !borrow.values.iter().any(|v| self.values_same_zero(v, &val)) {
+                    if self
+                        .collection_entry_index(Gc::as_ptr(s) as usize, &borrow.values, &val, |value| value)
+                        .is_none()
+                    {
                         borrow.values.push(val);
                     }
                     drop(borrow);
@@ -36630,11 +36667,21 @@ impl<'gc> VM<'gc> {
                 BUILTIN_SET_HAS | BUILTIN_WEAKSET_HAS => {
                     let val = args.first().cloned().unwrap_or(Value::Undefined);
                     let borrow = s.borrow();
-                    return Value::Boolean(borrow.values.iter().any(|v| self.values_same_zero(v, &val)));
+                    return Value::Boolean(
+                        self.collection_entry_index(Gc::as_ptr(s) as usize, &borrow.values, &val, |value| value)
+                            .is_some(),
+                    );
                 }
                 BUILTIN_SET_DELETE | BUILTIN_WEAKSET_DELETE => {
                     let val = args.first().cloned().unwrap_or(Value::Undefined);
                     let mut borrow = s.borrow_mut(ctx);
+                    if matches!(val, Value::Number(_)) {
+                        let position = self.collection_entry_index(Gc::as_ptr(s) as usize, &borrow.values, &val, |value| value);
+                        if let Some(position) = position {
+                            borrow.values.remove(position);
+                        }
+                        return Value::Boolean(position.is_some());
+                    }
                     let len_before = borrow.values.len();
                     borrow.values.retain(|v| !self.values_same_zero(v, &val));
                     return Value::Boolean(borrow.values.len() < len_before);
@@ -40034,6 +40081,50 @@ impl<'gc> VM<'gc> {
         }
     }
 
+    fn collection_entry_index<T>(
+        &self,
+        owner: usize,
+        entries: &[T],
+        key: &Value<'gc>,
+        entry_key: impl Fn(&T) -> &Value<'gc>,
+    ) -> Option<usize> {
+        let hint_key = match key {
+            Value::Number(number) if entries.len() >= 16 => Some((
+                owner,
+                if number.is_nan() {
+                    f64::NAN.to_bits()
+                } else if *number == 0.0 {
+                    0
+                } else {
+                    number.to_bits()
+                },
+            )),
+            _ => None,
+        };
+        if let Some(hint_key) = hint_key
+            && let Some(position) = self.collection_lookup_hints.borrow().get(&hint_key).copied()
+            && entries
+                .get(position)
+                .is_some_and(|entry| self.values_same_zero(entry_key(entry), key))
+        {
+            return Some(position);
+        }
+        let position = entries.iter().position(|entry| self.values_same_zero(entry_key(entry), key));
+        if let Some(hint_key) = hint_key {
+            let mut hints = self.collection_lookup_hints.borrow_mut();
+            if let Some(position) = position {
+                // Hints hold no GC values and must always validate against the live collection.
+                if hints.len() >= 1024 && !hints.contains_key(&hint_key) {
+                    hints.clear();
+                }
+                hints.insert(hint_key, position);
+            } else {
+                hints.remove(&hint_key);
+            }
+        }
+        position
+    }
+
     fn values_same_zero(&self, a: &Value<'gc>, b: &Value<'gc>) -> bool {
         match (a, b) {
             (Value::Number(x), Value::Number(y)) => (x.is_nan() && y.is_nan()) || x == y,
@@ -40342,6 +40433,9 @@ impl<'gc> VM<'gc> {
         let module_key = self.chunk.fn_source_paths.get(&ip).cloned();
         let active_module_key = module_key.clone();
         self.with_module_execution_context(active_module_key.as_deref(), |vm| {
+            if let Some(result) = vm.try_native_jit_helper_call(ctx, ip, stack_args, upvalues)? {
+                return Ok(result);
+            }
             let arg_count = saved_args.as_ref().map_or(stack_args.len(), Vec::len);
             vm.stack.push(Value::Undefined);
             let bp = vm.stack.len();
@@ -43763,6 +43857,27 @@ impl<'gc> VM<'gc> {
         key: &str,
         value: &Value<'gc>,
     ) -> Result<(), JSError> {
+        if let Value::Array(array) = target
+            && let Ok(index) = key.parse::<usize>()
+            && index < u32::MAX as usize
+            && index.to_string() == key
+        {
+            let data = array.borrow();
+            if index < data.elements.len()
+                && (index as u64) < self.array_length_u64(&data)
+                && !data.props.contains_key("__typedarray_name__")
+                && !data.props.contains_key(key)
+                && !matches!(data.props.get("__non_extensible__"), Some(Value::Boolean(true)))
+                && !matches!(data.props.get("__sealed__"), Some(Value::Boolean(true)))
+                && !matches!(data.props.get("__frozen__"), Some(Value::Boolean(true)))
+            {
+                drop(data);
+                let mut data = array.borrow_mut(ctx);
+                data.elements[index] = value.clone();
+                data.props.shift_remove(&format!("__deleted_{index}"));
+                return Ok(());
+            }
+        }
         let mut desc = IndexMap::new();
         desc.insert("value".to_string(), value.clone());
         desc.insert("writable".to_string(), Value::Boolean(true));
@@ -43802,6 +43917,24 @@ impl<'gc> VM<'gc> {
             Err(self.vm_error_to_js_error(ctx, &thrown))
         } else {
             Err(crate::raise_type_error!("Cannot define property"))
+        }
+    }
+
+    fn ordinary_dense_array_element(&self, target: &Value<'gc>, index: usize) -> Option<Value<'gc>> {
+        let Value::Array(array) = target else { return None };
+        let data = array.borrow();
+        if data.props.len() > 2
+            || data
+                .props
+                .keys()
+                .any(|key| !matches!(key.as_str(), "__proto__" | "__array_length__"))
+            || (index as u64) >= self.array_length_u64(&data)
+        {
+            return None;
+        }
+        match data.elements.get(index)? {
+            Value::Property { .. } | Value::Uninitialized => None,
+            value => Some(value.clone()),
         }
     }
 

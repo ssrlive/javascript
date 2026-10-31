@@ -212,6 +212,9 @@ pub(crate) unsafe extern "C" fn baseline_loop_prepare(
         .frames
         .last()
         .map_or((0, &state.vm.top_level_cells), |frame| (frame.bp, &frame.local_cells));
+    if plan.transient_start.is_some_and(|start| bp + start != state.vm.stack.len()) {
+        return 0;
+    }
     if cells.keys().any(|slot| bp + slot >= state.vm.stack.len()) {
         return 0;
     }
@@ -241,6 +244,35 @@ pub(crate) unsafe extern "C" fn baseline_loop_prepare(
             return 0;
         };
         unsafe { scratch.add(plan.locals.len() + index).write(*number) };
+        if plan.array_local.is_some() && *number != plan.constant_values[index] {
+            return 0;
+        }
+    }
+    if let Some(slot) = plan.array_local {
+        let array = if let Some(cell) = cells.get(&slot) {
+            cell.borrow().clone()
+        } else {
+            let Some(value) = state.vm.stack.get(bp + slot) else { return 0 };
+            value.clone()
+        };
+        let Value::Array(array) = array else { return 0 };
+        let Some((bytes, offset)) = state.vm.native_uint32_loop_buffer(&array, plan.array_length) else {
+            return 0;
+        };
+        let bytes = bytes.borrow();
+        for index in 0..plan.array_length {
+            let mut raw = [0u8; 4];
+            for (byte, raw) in raw.iter_mut().enumerate() {
+                let Value::Number(value) = bytes.elements[offset + index * 4 + byte] else {
+                    return 0;
+                };
+                if !(0.0..=255.0).contains(&value) || value.fract() != 0.0 {
+                    return 0;
+                }
+                *raw = value as u8;
+            }
+            unsafe { scratch.add(plan.array_start() + index).write(u32::from_ne_bytes(raw) as f64) };
+        }
     }
     unsafe { scratch.add(plan.metadata()).cast::<usize>().write(quota) };
     1
@@ -257,6 +289,30 @@ pub(crate) unsafe extern "C" fn baseline_loop_commit(
     let plan = unsafe { &*plan };
     let bp = state.vm.frames.last().map_or(0, |frame| frame.bp);
     let cells = state.vm.frames.last().map_or(&state.vm.top_level_cells, |frame| &frame.local_cells);
+    if plan.array_written {
+        let slot = plan.array_local.expect("indexed loop has an array local");
+        let array = cells
+            .get(&slot)
+            .map_or_else(|| state.vm.stack[bp + slot].clone(), |cell| cell.borrow().clone());
+        let Value::Array(array) = array else {
+            unreachable!("native loop does not replace its array")
+        };
+        // No calls, GC, suspension or shared memory occur between prepare and
+        // commit, so the validated view and backing storage cannot change.
+        let (bytes, offset) = state
+            .vm
+            .native_uint32_loop_buffer(&array, plan.array_length)
+            .expect("validated native loop buffer");
+        let mut bytes = bytes.borrow_mut(state.ctx);
+        let mut array = array.borrow_mut(state.ctx);
+        for index in 0..plan.array_length {
+            let value = unsafe { *scratch.add(plan.array_start() + index) };
+            array.elements[index] = Value::Number(value);
+            for (byte, value) in (value as u32).to_ne_bytes().iter().enumerate() {
+                bytes.elements[offset + index * 4 + byte] = Value::Number(*value as f64);
+            }
+        }
+    }
     for (index, slot) in plan.locals.iter().enumerate() {
         if plan.written.contains(slot) {
             let value = Value::Number(unsafe { *scratch.add(index) });
@@ -773,6 +829,89 @@ impl<'gc> VM<'gc> {
         Ok(result)
     }
 
+    pub(super) fn try_native_jit_helper_call(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        ip: usize,
+        args: &[Value<'gc>],
+        upvalues: &[UpvalueCell<'gc>],
+    ) -> Result<Option<Value<'gc>>, JSError> {
+        if self.chunk.named_fn_self_ips.contains(&ip) || self.chunk.class_constructor_ips.contains(&ip) {
+            return Ok(None);
+        }
+        let Some(entry) = self.jit_functions.get(&ip) else {
+            return Ok(None);
+        };
+        let Some(arguments) = args.get(..entry.arity) else {
+            return Ok(None);
+        };
+        let Some(captures) = upvalues.get(..entry.upvalue_count) else {
+            return Ok(None);
+        };
+        if !self.jit_dependencies_match(&entry.dependencies)
+            || (!entry.generic_value && !arguments.iter().all(|value| matches!(value, Value::Number(_))))
+            || !captures.iter().all(|cell| matches!(*cell.borrow(), Value::Number(_)))
+        {
+            return Ok(None);
+        }
+        let function = entry.function;
+        let generic_value = entry.generic_value;
+        if !generic_value && captures.is_empty() && arguments.len() <= 8 {
+            let mut frame = [crate::host_api::JitValue::undefined(); 8];
+            for (slot, value) in frame.iter_mut().zip(arguments) {
+                let Value::Number(value) = value else {
+                    unreachable!("numeric arguments were validated")
+                };
+                *slot = crate::host_api::JitValue::number(*value);
+            }
+            // This restricted numeric entry has no roots, captures, VM calls,
+            // or allocating safe points; it does not need a temporary VM stack.
+            let (status, value, exception) =
+                crate::host_api::invoke_native_jit(function, &mut frame[..arguments.len()], self.jit_roots.len())
+                    .map_err(|status| crate::raise_eval_error!(format!("JIT returned invalid status {status}")))?;
+            #[cfg(feature = "jit")]
+            {
+                self.jit_stats.optimized_calls += 1;
+            }
+            return match status {
+                crate::host_api::NativeJitStatus::Returned => value
+                    .as_number()
+                    .map(|value| Some(Value::Number(value)))
+                    .ok_or_else(|| crate::raise_eval_error!("JIT returned a non-numeric value through the numeric ABI")),
+                crate::host_api::NativeJitStatus::Deopt => Ok(None),
+                crate::host_api::NativeJitStatus::Suspended => Err(crate::raise_eval_error!("JIT suspension is not implemented")),
+                crate::host_api::NativeJitStatus::Threw => {
+                    let thrown = native_jit_exception_value(exception)?;
+                    let saved_try_stack = std::mem::take(&mut self.try_stack);
+                    let result = self.handle_throw(ctx, &thrown);
+                    self.try_stack = saved_try_stack;
+                    result.map(|()| unreachable!("native helper throw cannot be caught inside its isolated boundary"))
+                }
+            };
+        }
+        let stack_base = self.stack.len();
+        let saved_ip = self.ip;
+        let saved_try_stack = std::mem::take(&mut self.try_stack);
+        self.stack.push(Value::Undefined);
+        self.stack.extend(arguments.iter().cloned());
+        let result = self.execute_native_jit_call(
+            ctx,
+            stack_base,
+            arguments.len(),
+            function,
+            NativeJitCallOptions {
+                generic_value,
+                upvalues: captures,
+            },
+            false,
+        );
+        let result = result.map(|executed| executed.then(|| self.stack.pop().expect("native JIT helper returned without a result")));
+        self.stack.truncate(stack_base);
+        self.try_stack = saved_try_stack;
+        self.ip = saved_ip;
+        result
+    }
+
     fn execute_native_jit_call(
         &mut self,
         ctx: &GcContext<'gc>,
@@ -782,13 +921,13 @@ impl<'gc> VM<'gc> {
         options: NativeJitCallOptions<'_, 'gc>,
         jit_required: bool,
     ) -> Result<bool, JSError> {
-        let argument_values = self.stack[callee_idx + 1..callee_idx + 1 + arg_count].to_vec();
-        let mut root_values = argument_values.clone();
+        let mut root_values = self.stack[callee_idx + 1..callee_idx + 1 + arg_count].to_vec();
         root_values.extend(options.upvalues.iter().map(|cell| cell.borrow().clone()));
         let root_base = self.jit_roots.len();
+        let root_count = root_values.len();
         let mut arguments = Vec::with_capacity(root_values.len());
         for (index, value) in root_values.iter().enumerate() {
-            if (!options.generic_value || index >= argument_values.len()) && !matches!(value, Value::Number(_)) {
+            if (!options.generic_value || index >= arg_count) && !matches!(value, Value::Number(_)) {
                 return Err(crate::raise_eval_error!("numeric JIT function received a non-numeric argument"));
             }
             let root_index = root_base
@@ -796,7 +935,7 @@ impl<'gc> VM<'gc> {
                 .ok_or_else(|| crate::raise_eval_error!("JIT root index overflow"))?;
             arguments.push(native_jit_value_for_vm(value, root_index)?);
         }
-        self.jit_roots.extend(root_values.iter().cloned());
+        self.jit_roots.extend(root_values);
         let outcome = crate::host_api::invoke_native_jit(function, &mut arguments, root_base);
         let (status, result, exception) = match outcome {
             Ok(outcome) => outcome,
@@ -814,7 +953,7 @@ impl<'gc> VM<'gc> {
             crate::host_api::NativeJitStatus::Returned | crate::host_api::NativeJitStatus::Threw
         ) {
             for (index, cell) in options.upvalues.iter().enumerate() {
-                let argument_index = argument_values.len() + index;
+                let argument_index = arg_count + index;
                 let Some(argument) = arguments.get(argument_index) else {
                     self.jit_roots.truncate(root_base);
                     return Err(crate::raise_eval_error!("JIT omitted a captured upvalue from its call frame"));
@@ -833,7 +972,7 @@ impl<'gc> VM<'gc> {
         match status {
             crate::host_api::NativeJitStatus::Returned => {
                 let result = if options.generic_value {
-                    native_jit_value_to_vm(result, &self.jit_roots, root_base, root_values.len())
+                    native_jit_value_to_vm(result, &self.jit_roots, root_base, root_count)
                 } else {
                     result
                         .as_number()
@@ -1689,11 +1828,10 @@ impl<'gc> VM<'gc> {
                     let function = entry.function;
                     let dependencies_match = self.jit_dependencies_match(&entry.dependencies);
                     if let Some(captured_cells) = upvals.get(..upvalue_count) {
-                        let captured_values = captured_cells.iter().map(|cell| cell.borrow().clone()).collect::<Vec<_>>();
                         let argument_values = &self.stack[callee_idx + 1..callee_idx + 1 + arg_count];
                         if registered_arity == arg_count
                             && dependencies_match
-                            && captured_values.iter().all(|value| matches!(value, Value::Number(_)))
+                            && captured_cells.iter().all(|cell| matches!(*cell.borrow(), Value::Number(_)))
                             && (generic_value || argument_values.iter().all(|value| matches!(value, Value::Number(_))))
                         {
                             let call_count = {
@@ -6154,6 +6292,31 @@ impl<'gc> VM<'gc> {
         let index = self.stack.pop().expect("VM Stack underflow on GetIndex (index)");
         let obj = self.stack.pop().expect("VM Stack underflow on GetIndex (obj)");
 
+        if let (Value::Array(arr), Value::Number(number)) = (&obj, &index) {
+            let array = arr.borrow();
+            if array.props.contains_key("__typedarray_name__") {
+                drop(array);
+                let result = if number.is_finite() && *number >= 0.0 && number.fract() == 0.0 {
+                    self.ta_get_element(ctx, arr, *number as usize)
+                } else {
+                    Value::Undefined
+                };
+                self.stack.push(result);
+                return Ok(OpcodeAction::Continue);
+            }
+            if *number >= 0.0 && *number < 4_294_967_295.0 && number.fract() == 0.0 {
+                let position = *number as usize;
+                if position < array.elements.len()
+                    && (position as u64) < self.vm_array_logical_length_u64(&array)
+                    && !array.props.contains_key(&format!("__deleted_{position}"))
+                    && !matches!(array.props.get(&position.to_string()), Some(Value::Property { .. }))
+                {
+                    self.stack.push(array.elements[position].clone());
+                    return Ok(OpcodeAction::Continue);
+                }
+            }
+        }
+
         if matches!(obj, Value::Null | Value::Undefined) {
             let err = self.make_type_error_object(ctx, "Cannot read properties of null or undefined");
             self.handle_throw(ctx, &err)?;
@@ -6414,6 +6577,16 @@ impl<'gc> VM<'gc> {
         let index = self.stack.pop().expect("VM Stack underflow on SetIndex (index)");
         let obj = self.stack.pop().expect("VM Stack underflow on SetIndex (obj)");
         let _is_strict = self.current_execution_is_strict();
+
+        if let (Value::Array(arr), Value::Number(number)) = (&obj, &index)
+            && arr.borrow().props.contains_key("__typedarray_name__")
+        {
+            // ToPropertyKey(-0) is "0", unlike the canonical string key "-0".
+            let numeric_index = if *number == 0.0 { 0.0 } else { *number };
+            self.set_typed_array_element(ctx, arr, numeric_index, &val);
+            self.stack.push(val);
+            return Ok(OpcodeAction::Continue);
+        }
 
         // Fast path: plain array append with a non-negative integer index.
         // Bypasses as_property_key_string and the full assign_named_property machinery.
@@ -9572,6 +9745,34 @@ impl<'gc> VM<'gc> {
         PropDesc::data(Value::Number(len as f64), PropAttrs::empty()).write_to_map(&mut b.props, "length");
         b.props.insert("__non_extensible__".to_string(), Value::Boolean(true));
         b.props.insert("__frozen__".to_string(), Value::Boolean(true));
+    }
+}
+
+#[cfg(test)]
+mod collection_lookup_tests {
+    use super::*;
+
+    #[test]
+    fn numeric_hints_validate_live_positions_and_remain_bounded() {
+        let mut arena = crate::core::JsArenaVm::new(|ctx| VM::new(crate::core::Chunk::new(), ctx));
+        arena.mutate_root(|_, vm| {
+            let mut values = (0..2048).map(|index| Value::Number(index as f64)).collect::<Vec<_>>();
+            for index in 0..values.len() {
+                assert_eq!(vm.collection_entry_index(7, &values, &values[index], |value| value), Some(index));
+                assert!(vm.collection_lookup_hints.borrow().len() <= 1024);
+            }
+            let key = Value::Number(2000.0);
+            assert_eq!(vm.collection_entry_index(7, &values, &key, |value| value), Some(2000));
+            values.remove(0);
+            assert_eq!(vm.collection_entry_index(7, &values, &key, |value| value), Some(1999));
+            values[1999] = Value::Number(-3.0);
+            assert_eq!(vm.collection_entry_index(7, &values, &key, |value| value), None);
+            // An owner address can be reused after collection without retaining the old object.
+            values.reverse();
+            assert_eq!(vm.collection_entry_index(7, &values, &Value::Number(-3.0), |value| value), Some(47));
+            values.clear();
+            assert_eq!(vm.collection_entry_index(7, &values, &key, |value| value), None);
+        });
     }
 }
 

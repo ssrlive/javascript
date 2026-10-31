@@ -104,12 +104,18 @@ impl ControlFlowGraph {
         }
 
         let instruction_offsets = instructions.iter().map(|instruction| instruction.offset).collect::<HashSet<_>>();
-        for target in leaders.iter().copied().chain(chunk.fn_names.keys().copied()) {
+        let function_entries = super::function_entries(chunk);
+        let function_entries = function_entries
+            .keys()
+            .chain(chunk.fn_names.keys())
+            .copied()
+            .collect::<BTreeSet<_>>();
+        for target in leaders.iter().copied().chain(function_entries.iter().copied()) {
             if target < code.len() && !instruction_offsets.contains(&target) {
                 return Err(format!("control-flow target {target} is not an instruction boundary"));
             }
         }
-        for entry in chunk.fn_names.keys() {
+        for entry in &function_entries {
             if *entry >= code.len() || !instruction_offsets.contains(entry) {
                 return Err(format!("function entry {entry} is not an instruction boundary"));
             }

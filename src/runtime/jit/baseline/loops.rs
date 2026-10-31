@@ -8,7 +8,26 @@ use cranelift_codegen::ir::{
 };
 use cranelift_frontend::{FunctionBuilder, Variable};
 use cranelift_module::{Linkage, Module};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
+
+const MAX_INDEXED_ELEMENTS: usize = 1024;
+
+#[derive(Clone, Copy)]
+struct Operand {
+    boolean: bool,
+    local: Option<usize>,
+    bound: Option<usize>,
+}
+
+impl Operand {
+    fn number(bound: Option<usize>) -> Self {
+        Self {
+            boolean: false,
+            local: None,
+            bound,
+        }
+    }
+}
 
 struct Instruction {
     opcode: Opcode,
@@ -21,6 +40,11 @@ pub(crate) struct NumericLoop {
     pub(crate) written: BTreeSet<usize>,
     pub(crate) reboxed: BTreeSet<usize>,
     pub(crate) constants: Vec<usize>,
+    pub(crate) constant_values: Vec<f64>,
+    pub(crate) array_local: Option<usize>,
+    pub(crate) array_length: usize,
+    pub(crate) array_written: bool,
+    pub(crate) transient_start: Option<usize>,
     pub(crate) header_count: usize,
     pub(crate) exit: usize,
     pub(crate) condition: usize,
@@ -35,14 +59,43 @@ impl NumericLoop {
             written: BTreeSet::new(),
             reboxed: BTreeSet::new(),
             constants: Vec::new(),
+            constant_values: Vec::new(),
+            array_local: None,
+            array_length: 0,
+            array_written: false,
+            transient_start: None,
             header_count: 0,
             exit: 0,
             condition: 0,
             backedge: 0,
         };
+        let mut scan = start;
+        for _ in 0..96 {
+            let opcode = Opcode::try_from(*chunk.code.get(scan)?).ok()?;
+            let next = scan + 1 + opcode.operand_len(&chunk.code, scan + 1).ok()?;
+            if opcode == Opcode::ClearLocalCells {
+                let slot = chunk.code[scan + 1] as usize;
+                plan.transient_start = Some(plan.transient_start.map_or(slot, |old| old.min(slot)));
+            }
+            if opcode == Opcode::Jump {
+                break;
+            }
+            scan = next;
+        }
         let mut locals = BTreeSet::new();
-        let mut stack = Vec::<bool>::new();
+        let mut numeric_locals = BTreeSet::new();
+        let mut bounds = HashMap::new();
+        let mut stack = Vec::<Operand>::new();
         let mut offset = start;
+        let number = |value: Operand, locals: &mut BTreeSet<usize>| -> Option<()> {
+            if value.boolean {
+                return None;
+            }
+            if let Some(slot) = value.local {
+                locals.insert(slot);
+            }
+            Some(())
+        };
         // Only balanced, single-backedge loops without calls or internal branches.
         for _ in 0..96 {
             let opcode = Opcode::try_from(*chunk.code.get(offset)?).ok()?;
@@ -51,21 +104,47 @@ impl NumericLoop {
             match opcode {
                 Opcode::Constant => {
                     let index = u16::from_le_bytes(chunk.code[offset + 1..next].try_into().ok()?) as usize;
-                    if !matches!(chunk.constants.get(index), Some(JsValue::Number(_))) {
+                    let Some(JsValue::Number(value)) = chunk.constants.get(index) else {
                         return None;
-                    }
+                    };
                     operand = plan.constants.len();
                     plan.constants.push(offset + 1 - start);
-                    stack.push(false);
+                    plan.constant_values.push(*value);
+                    let bound = (*value >= 0.0 && *value < MAX_INDEXED_ELEMENTS as f64 && value.fract() == 0.0).then_some(*value as usize);
+                    stack.push(Operand::number(bound));
                 }
                 Opcode::GetLocal | Opcode::SetLocal | Opcode::ReboxLocal => {
                     operand = chunk.code[offset + 1] as usize;
+                    if let Some(start) = plan.transient_start
+                        && operand >= start
+                    {
+                        let index = operand - start;
+                        if opcode == Opcode::GetLocal {
+                            stack.push(*stack.get(index)?);
+                        } else if opcode == Opcode::SetLocal {
+                            let value = *stack.last()?;
+                            number(value, &mut numeric_locals)?;
+                            *stack.get_mut(index)? = value;
+                        }
+                        plan.instructions.push(Instruction { opcode, operand });
+                        offset = next;
+                        continue;
+                    }
                     locals.insert(operand);
                     if opcode == Opcode::GetLocal {
-                        stack.push(false);
+                        stack.push(Operand {
+                            boolean: false,
+                            local: Some(operand),
+                            bound: bounds.get(&operand).copied(),
+                        });
                     } else if opcode == Opcode::SetLocal {
-                        if *stack.last()? {
-                            return None;
+                        let value = *stack.last()?;
+                        number(value, &mut numeric_locals)?;
+                        numeric_locals.insert(operand);
+                        if let Some(bound) = value.bound {
+                            bounds.insert(operand, bound);
+                        } else {
+                            bounds.remove(&operand);
                         }
                         plan.written.insert(operand);
                     } else {
@@ -82,16 +161,63 @@ impl NumericLoop {
                 | Opcode::GreaterEqual
                 | Opcode::Equal
                 | Opcode::StrictEqual
-                | Opcode::NotEqual => {
-                    if stack.pop()? || stack.pop()? {
-                        return None;
-                    }
-                    stack.push(!matches!(opcode, Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div));
+                | Opcode::NotEqual
+                | Opcode::BitwiseAnd
+                | Opcode::BitwiseOr
+                | Opcode::BitwiseXor
+                | Opcode::ShiftLeft
+                | Opcode::ShiftRight
+                | Opcode::UnsignedShiftRight => {
+                    let right = stack.pop()?;
+                    let left = stack.pop()?;
+                    number(right, &mut numeric_locals)?;
+                    number(left, &mut numeric_locals)?;
+                    let bound = if opcode == Opcode::BitwiseAnd {
+                        right.bound.or(left.bound)
+                    } else {
+                        None
+                    };
+                    let boolean = matches!(
+                        opcode,
+                        Opcode::LessThan
+                            | Opcode::GreaterThan
+                            | Opcode::LessEqual
+                            | Opcode::GreaterEqual
+                            | Opcode::Equal
+                            | Opcode::StrictEqual
+                            | Opcode::NotEqual
+                    );
+                    stack.push(Operand {
+                        boolean,
+                        local: None,
+                        bound,
+                    });
                 }
                 Opcode::Negate | Opcode::Increment | Opcode::Decrement | Opcode::ToNumber | Opcode::ToNumeric => {
-                    if *stack.last()? {
+                    number(*stack.last()?, &mut numeric_locals)?;
+                    if matches!(opcode, Opcode::Negate | Opcode::Increment | Opcode::Decrement) {
+                        *stack.last_mut()? = Operand::number(None);
+                    }
+                }
+                Opcode::GetIndex | Opcode::SetIndex => {
+                    if plan.header_count == 0 {
                         return None;
                     }
+                    if opcode == Opcode::SetIndex {
+                        number(stack.pop()?, &mut numeric_locals)?;
+                        plan.array_written = true;
+                    }
+                    let index = stack.pop()?;
+                    number(index, &mut numeric_locals)?;
+                    let bound = index.bound?;
+                    let object = stack.pop()?;
+                    let slot = object.local?;
+                    if object.boolean || plan.array_local.is_some_and(|local| local != slot) {
+                        return None;
+                    }
+                    plan.array_local = Some(slot);
+                    plan.array_length = plan.array_length.max(bound + 1);
+                    stack.push(Operand::number(None));
                 }
                 Opcode::Dup => stack.push(*stack.last()?),
                 Opcode::Swap => {
@@ -104,8 +230,14 @@ impl NumericLoop {
                 Opcode::Pop => {
                     stack.pop()?;
                 }
+                Opcode::ClearLocalCells => {
+                    operand = chunk.code[offset + 1] as usize;
+                }
                 Opcode::JumpIfFalse if plan.header_count == 0 => {
-                    stack.pop()?;
+                    let condition = stack.pop()?;
+                    if let Some(slot) = condition.local {
+                        numeric_locals.insert(slot);
+                    }
                     if !stack.is_empty() || !plan.written.is_empty() {
                         return None;
                     }
@@ -124,6 +256,12 @@ impl NumericLoop {
                     }
                     plan.backedge = offset - start;
                     plan.instructions.push(Instruction { opcode, operand });
+                    if let Some(slot) = plan.array_local {
+                        if numeric_locals.contains(&slot) || plan.written.contains(&slot) || plan.reboxed.contains(&slot) {
+                            return None;
+                        }
+                        locals.remove(&slot);
+                    }
                     plan.locals = locals.into_iter().collect();
                     return Some(plan);
                 }
@@ -140,6 +278,10 @@ impl NumericLoop {
     }
 
     pub(crate) fn metadata(&self) -> usize {
+        self.array_start() + self.array_length
+    }
+
+    pub(crate) fn array_start(&self) -> usize {
         self.locals.len() + self.constants.len()
     }
 
@@ -191,9 +333,16 @@ impl NumericLoop {
             let local = |slot: usize| -> Variable { locals[self.locals.binary_search(&slot).expect("decoded local is registered")] };
             match instruction.opcode {
                 Opcode::Constant => stack.push((constants[instruction.operand], false)),
+                Opcode::GetLocal if self.transient_start.is_some_and(|start| instruction.operand >= start) => {
+                    stack.push(stack[instruction.operand - self.transient_start.unwrap()]);
+                }
+                Opcode::SetLocal if self.transient_start.is_some_and(|start| instruction.operand >= start) => {
+                    stack[instruction.operand - self.transient_start.unwrap()] = *stack.last().expect("verified transient local");
+                }
+                Opcode::GetLocal if Some(instruction.operand) == self.array_local => stack.push((scratch, false)),
                 Opcode::GetLocal => stack.push((builder.use_var(local(instruction.operand)), false)),
                 Opcode::SetLocal => builder.def_var(local(instruction.operand), stack.last().expect("verified stack").0),
-                Opcode::ReboxLocal | Opcode::ToNumber | Opcode::ToNumeric => {}
+                Opcode::ReboxLocal | Opcode::ClearLocalCells | Opcode::ToNumber | Opcode::ToNumeric => {}
                 Opcode::Pop => {
                     stack.pop();
                 }
@@ -201,6 +350,56 @@ impl NumericLoop {
                 Opcode::Swap => {
                     let len = stack.len();
                     stack.swap(len - 1, len - 2);
+                }
+                Opcode::GetIndex | Opcode::SetIndex => {
+                    let stored = if instruction.opcode == Opcode::SetIndex {
+                        Some(stack.pop().expect("verified value").0)
+                    } else {
+                        None
+                    };
+                    let index = stack.pop().expect("verified index").0;
+                    stack.pop().expect("verified array");
+                    let index = builder.ins().fcvt_to_uint(types::I32, index);
+                    let index = builder.ins().uextend(pointer_type, index);
+                    let offset = builder.ins().ishl_imm_u(index, 3);
+                    let address = builder.ins().iadd(scratch, offset);
+                    let offset = (self.array_start() * 8) as i32;
+                    let result = if let Some(value) = stored {
+                        let integer = super::numeric::to_uint32(builder, value);
+                        let converted = builder.ins().fcvt_from_uint(types::F64, integer);
+                        builder.ins().store(MemFlagsData::trusted(), converted, address, offset);
+                        // Assignment evaluates to its unconverted RHS.
+                        value
+                    } else {
+                        builder.ins().load(types::F64, MemFlagsData::trusted(), address, offset)
+                    };
+                    stack.push((result, false));
+                }
+                Opcode::BitwiseAnd
+                | Opcode::BitwiseOr
+                | Opcode::BitwiseXor
+                | Opcode::ShiftLeft
+                | Opcode::ShiftRight
+                | Opcode::UnsignedShiftRight => {
+                    let right = stack.pop().expect("verified rhs").0;
+                    let left = stack.pop().expect("verified lhs").0;
+                    let left = super::numeric::to_uint32(builder, left);
+                    let right = super::numeric::to_uint32(builder, right);
+                    let result = match instruction.opcode {
+                        Opcode::BitwiseAnd => builder.ins().band(left, right),
+                        Opcode::BitwiseOr => builder.ins().bor(left, right),
+                        Opcode::BitwiseXor => builder.ins().bxor(left, right),
+                        Opcode::ShiftLeft => builder.ins().ishl(left, right),
+                        Opcode::ShiftRight => builder.ins().sshr(left, right),
+                        Opcode::UnsignedShiftRight => builder.ins().ushr(left, right),
+                        _ => unreachable!(),
+                    };
+                    let result = if instruction.opcode == Opcode::UnsignedShiftRight {
+                        builder.ins().fcvt_from_uint(types::F64, result)
+                    } else {
+                        builder.ins().fcvt_from_sint(types::F64, result)
+                    };
+                    stack.push((result, false));
                 }
                 Opcode::Negate | Opcode::Increment | Opcode::Decrement => {
                     let (value, _) = stack.pop().expect("verified operand");
@@ -366,6 +565,67 @@ impl BaselineJit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_uint32_loop_is_lowered_without_body_helpers() {
+        let mut runtime = crate::runtime::JsRuntime::new();
+        runtime
+            .start_eval(
+                "function compute(n) { const values = new Uint32Array(256); let checksum = 0; \
+             for (let i = 0; i < n; i++) { const index = i & 255; \
+             values[index] = (values[index] + i * 17 + 3) >>> 0; checksum += values[index]; } \
+             return checksum + values[0]; } compute(2000);",
+            )
+            .unwrap();
+        runtime.mutate_root(|_, vm| {
+            let chunk = &vm.chunk;
+            let mut offset = 0;
+            while offset < chunk.code.len() {
+                let opcode = Opcode::try_from(chunk.code[offset]).unwrap();
+                let next = offset + 1 + opcode.operand_len(&chunk.code, offset + 1).unwrap();
+                if opcode == Opcode::Jump {
+                    let target = u32::from_le_bytes(chunk.code[offset + 1..next].try_into().unwrap()) as usize;
+                    if target < offset {
+                        let mut decoded = Vec::new();
+                        let mut ip = target;
+                        while ip <= offset {
+                            let opcode = Opcode::try_from(chunk.code[ip]).unwrap();
+                            let next = ip + 1 + opcode.operand_len(&chunk.code, ip + 1).unwrap();
+                            decoded.push((opcode, chunk.code[ip + 1..next].to_vec()));
+                            ip = next;
+                        }
+                        let plan = NumericLoop::build(chunk, target).unwrap_or_else(|| panic!("{decoded:?}"));
+                        assert_eq!(plan.array_length, 256);
+                        assert!(plan.array_written);
+                        let mut jit = BaselineJit::new().unwrap();
+                        jit.compile_loop(plan, None).unwrap();
+                        use cranelift_codegen::ir::Opcode as IrOpcode;
+                        let function = &jit.context.func;
+                        let body = function
+                            .layout
+                            .blocks()
+                            .find(|&block| {
+                                function
+                                    .layout
+                                    .block_insts(block)
+                                    .any(|instruction| function.dfg.insts[instruction].opcode() == IrOpcode::Fmul)
+                            })
+                            .unwrap();
+                        assert!(
+                            function.layout.block_insts(body).all(|instruction| !matches!(
+                                function.dfg.insts[instruction].opcode(),
+                                IrOpcode::Call | IrOpcode::CallIndirect
+                            )),
+                            "indexed loop body must not invoke helpers"
+                        );
+                        return;
+                    }
+                }
+                offset = next;
+            }
+            panic!("expected indexed loop backedge");
+        });
+    }
 
     #[test]
     fn compiler_generated_numeric_function_loop_is_recognized() {

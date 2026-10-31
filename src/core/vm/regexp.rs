@@ -1,10 +1,14 @@
 use super::*;
 use regress::Regex;
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
+
+type RegexCache = HashMap<Vec<u16>, HashMap<String, Rc<Regex>>>;
 
 thread_local! {
-    static REGEX_CACHE: RefCell<HashMap<(Vec<u16>, String), Regex>> = RefCell::new(HashMap::new());
+    static REGEX_CACHE: RefCell<RegexCache> = RefCell::new(HashMap::new());
 }
 
 const U16_BANG: u16 = b'!' as u16;
@@ -26,18 +30,27 @@ const LEGACY_REGEXP_LAST_PAREN_KEY: &str = "__legacy_regexp_last_paren__";
 const LEGACY_REGEXP_LEFT_CONTEXT_KEY: &str = "__legacy_regexp_left_context__";
 const LEGACY_REGEXP_RIGHT_CONTEXT_KEY: &str = "__legacy_regexp_right_context__";
 const LEGACY_REGEXP_PAREN_PREFIX: &str = "__legacy_regexp_paren_";
+const LEGACY_REGEXP_PAREN_KEYS: [&str; 9] = [
+    "__legacy_regexp_paren_1",
+    "__legacy_regexp_paren_2",
+    "__legacy_regexp_paren_3",
+    "__legacy_regexp_paren_4",
+    "__legacy_regexp_paren_5",
+    "__legacy_regexp_paren_6",
+    "__legacy_regexp_paren_7",
+    "__legacy_regexp_paren_8",
+    "__legacy_regexp_paren_9",
+];
 
-/// Compile a regex, returning a cached copy when the same pattern+flags
-/// have been compiled before.
-pub(crate) fn get_or_compile_regex(pattern: &[u16], flags: &str) -> Result<Regex, JSError> {
+/// Share the immutable matcher when the same pattern and flags were compiled before.
+pub(crate) fn get_or_compile_regex(pattern: &[u16], flags: &str) -> Result<Rc<Regex>, JSError> {
     REGEX_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
-        let key = (pattern.to_vec(), flags.to_string());
-        if let Some(re) = cache.get(&key) {
+        if let Some(re) = cache.get(pattern).and_then(|patterns| patterns.get(flags)) {
             return Ok(re.clone());
         }
-        let re = create_regex_from_utf16(pattern, flags)?;
-        cache.insert(key, re.clone());
+        let re = Rc::new(create_regex_from_utf16(pattern, flags)?);
+        cache.entry(pattern.to_vec()).or_default().insert(flags.to_string(), re.clone());
         Ok(re)
     })
 }
@@ -520,16 +533,24 @@ impl<'gc> VM<'gc> {
         captures: &[Option<std::ops::Range<usize>>],
         mapped_input: bool,
     ) {
-        self.set_legacy_regexp_value(ctx, LEGACY_REGEXP_INPUT_KEY, input_u16.to_vec());
-        self.set_legacy_regexp_value(ctx, LEGACY_REGEXP_LAST_MATCH_KEY, input_u16[match_start..match_end].to_vec());
-        self.set_legacy_regexp_value(ctx, LEGACY_REGEXP_LEFT_CONTEXT_KEY, input_u16[..match_start].to_vec());
-        self.set_legacy_regexp_value(ctx, LEGACY_REGEXP_RIGHT_CONTEXT_KEY, input_u16[match_end..].to_vec());
-
+        let Some(ctor) = self.legacy_regexp_ctor() else { return };
+        let mut ctor = ctor.borrow_mut(ctx);
+        let mut put = |key: &str, value: Value<'gc>| {
+            if let Some(slot) = ctor.get_mut(key) {
+                *slot = value;
+            } else {
+                ctor.insert(key.to_string(), value);
+            }
+        };
+        put(LEGACY_REGEXP_INPUT_KEY, Value::String(input_u16.to_vec()));
+        put(
+            LEGACY_REGEXP_LAST_MATCH_KEY,
+            Value::String(input_u16[match_start..match_end].to_vec()),
+        );
+        put(LEGACY_REGEXP_LEFT_CONTEXT_KEY, Value::String(input_u16[..match_start].to_vec()));
+        put(LEGACY_REGEXP_RIGHT_CONTEXT_KEY, Value::String(input_u16[match_end..].to_vec()));
         let mut last_paren = Vec::new();
-        for capture_index in 0..9 {
-            self.set_legacy_regexp_value(ctx, &format!("{LEGACY_REGEXP_PAREN_PREFIX}{}", capture_index + 1), Vec::new());
-        }
-
+        let mut parens: [Vec<u16>; 9] = std::array::from_fn(|_| Vec::new());
         for (capture_index, capture) in captures.iter().enumerate() {
             let Some(range) = capture else {
                 continue;
@@ -544,16 +565,15 @@ impl<'gc> VM<'gc> {
             };
             let capture_value = input_u16[capture_start..capture_end].to_vec();
             if capture_index < 9 {
-                self.set_legacy_regexp_value(
-                    ctx,
-                    &format!("{LEGACY_REGEXP_PAREN_PREFIX}{}", capture_index + 1),
-                    capture_value.clone(),
-                );
+                parens[capture_index] = capture_value.clone();
             }
             last_paren = capture_value;
         }
 
-        self.set_legacy_regexp_value(ctx, LEGACY_REGEXP_LAST_PAREN_KEY, last_paren);
+        for (index, value) in parens.into_iter().enumerate() {
+            put(LEGACY_REGEXP_PAREN_KEYS[index], Value::String(value));
+        }
+        put(LEGACY_REGEXP_LAST_PAREN_KEY, Value::String(last_paren));
     }
 
     pub(super) fn regexp_handle_host_fn(
@@ -2611,9 +2631,9 @@ impl<'gc> VM<'gc> {
         format!("/{}/{}", source, flags)
     }
 
-    fn regex_prepare_input(&self, input_u16: &[u16], flags: &str) -> (Vec<u16>, bool) {
+    fn regex_prepare_input<'a>(&self, input_u16: &'a [u16], flags: &str) -> (Cow<'a, [u16]>, bool) {
         if !flags.contains('R') {
-            return (input_u16.to_vec(), false);
+            return (Cow::Borrowed(input_u16), false);
         }
 
         let mut normalized = Vec::with_capacity(input_u16.len());
@@ -2627,7 +2647,7 @@ impl<'gc> VM<'gc> {
                 index += 1;
             }
         }
-        (normalized, true)
+        (Cow::Owned(normalized), true)
     }
 
     fn regex_map_index_back(original: &[u16], normalized_index: usize) -> usize {
@@ -2701,7 +2721,8 @@ impl<'gc> VM<'gc> {
                 };
                 let matched_str = &input_u16[match_start..match_end];
 
-                let mut result_items: Vec<Value<'gc>> = vec![Value::String(matched_str.to_vec())];
+                let mut result_items = Vec::with_capacity(m.captures.len() + 1);
+                result_items.push(Value::String(matched_str.to_vec()));
                 // Add capturing groups
                 for cap in &m.captures {
                     match cap {
@@ -3011,5 +3032,33 @@ impl<'gc> VM<'gc> {
             results.push(Value::String(input_u16[pos..].to_vec()));
         }
         results
+    }
+}
+
+#[cfg(test)]
+mod matcher_cache_tests {
+    use super::*;
+
+    #[test]
+    fn cached_matchers_share_compiled_storage_and_input_without_mutable_match_state() {
+        let pattern = crate::unicode::utf8_to_utf16("(a+)(b)?");
+        let first = get_or_compile_regex(&pattern, "g").unwrap();
+        let second = get_or_compile_regex(&pattern, "g").unwrap();
+        assert!(Rc::ptr_eq(&first, &second));
+        let other = get_or_compile_regex(&pattern, "i").unwrap();
+        assert!(!Rc::ptr_eq(&first, &other));
+        let input = crate::unicode::utf8_to_utf16("aab aa");
+        assert_eq!(first.find_from_ucs2(&input, 0).next().unwrap().range, 0..3);
+        assert_eq!(second.find_from_ucs2(&input, 4).next().unwrap().range, 4..6);
+        assert_eq!(first.find_from_ucs2(&input, 0).next().unwrap().range, 0..3);
+        let mut arena = crate::core::JsArenaVm::new(|ctx| VM::new(crate::core::Chunk::new(), ctx));
+        arena.mutate_root(|_, vm| {
+            assert!(matches!(vm.regex_prepare_input(&input, "").0, Cow::Borrowed(_)));
+            let input = crate::unicode::utf8_to_utf16("a\r\nb");
+            let (normalized, mapped) = vm.regex_prepare_input(&input, "R");
+            assert!(mapped);
+            assert_eq!(&*normalized, &crate::unicode::utf8_to_utf16("a\nb"));
+            assert_eq!(VM::regex_map_index_back(&input, 2), 3);
+        });
     }
 }

@@ -13,6 +13,513 @@ fn executed_bytecodes(runtime: &mut JsRuntime) -> u64 {
     stats.interpreter_opcodes + stats.baseline_opcodes
 }
 
+#[test]
+fn jit_direct_numeric_callbacks_preserve_throw_boundaries_and_unused_arguments() {
+    for required in [false, true] {
+        let mut runtime = JsRuntime::new();
+        runtime.set_jit_required(required);
+        assert_eq!(
+            runtime
+                .eval(
+                    "function numeric(value,index) { if(index===2) throw value+index; return value*2; } \
+             let caught=0; let final=0; try { [3,4,5].map(numeric); } catch(error) { caught=error; } \
+             finally { final=11; } caught+final;"
+                )
+                .unwrap(),
+            JsValue::Number(18.0)
+        );
+        assert_eq!(runtime.jit_stats().optimized_calls, 3);
+        runtime.collect_garbage();
+        let before = runtime.jit_stats().optimized_calls;
+        assert_eq!(
+            runtime
+                .eval("function total(a,b) { return a+b; } [1,2,3,4].reduce(total,0);")
+                .unwrap(),
+            JsValue::Number(10.0)
+        );
+        assert_eq!(runtime.jit_stats().optimized_calls - before, 4);
+        assert_eq!(
+            runtime
+                .eval(
+                    "function identity(value) { return value; } const object={n:17}; \
+             [object].map(identity)[0]===object;"
+                )
+                .unwrap(),
+            JsValue::Boolean(true)
+        );
+        assert_eq!(
+            runtime
+                .eval(
+                    "function wide(a,b,c,d,e,f,g,h,i) { return a+b+c+d+e+f+g+h+i; } \
+             wide.apply(null,[1,2,3,4,5,6,7,8,9]);"
+                )
+                .unwrap(),
+            JsValue::Number(45.0)
+        );
+        if required {
+            assert_no_interpreter(&mut runtime);
+        }
+    }
+}
+
+#[test]
+fn jit_array_callback_elements_observe_live_mutations_and_species() {
+    let source = r#"
+        const result = [];
+        const dense = [1,2,3,4];
+        result.push(dense.map((value,index,array) => {
+            if (index === 0) {
+                delete array[1];
+                Object.defineProperty(array, "2", {get() { return 17; }, configurable:true});
+                array[3] = 23;
+                array.push(99);
+            }
+            return value * 2;
+        }).join(","));
+        const reduced = [1,2,3,4];
+        result.push(reduced.reduce((total,value,index,array) => {
+            if (index === 0) { array.length = 2; array[1] = 19; }
+            return total + value;
+        },0));
+        result.push([undefined,2,3].reduce((a,b) => String(a) + b));
+        result.push([1,2,3].reduce((a,b) => a+b));
+        const inherited = Object.create(Array.prototype);
+        Object.defineProperty(inherited, "1", {get() { return 31; }, configurable:true});
+        const holes = [7, ,9];
+        Object.setPrototypeOf(holes, inherited);
+        result.push(holes.map(x=>x+1).join(","), holes.reduce((a,b)=>a+b,0));
+        let output;
+        const custom = [3,4,5];
+        custom.constructor = {[Symbol.species]: function(length) {
+            output = new Array(length);
+            Object.defineProperty(output, "1", {value:101, configurable:true});
+            Object.defineProperty(output, "2", {set() { throw "setter must not run"; }, configurable:true});
+            return output;
+        }};
+        const mapped = custom.map(value=>value*3);
+        result.push(mapped===output, mapped.join(","), Object.getOwnPropertyDescriptor(mapped,"1").writable);
+        const shared = [11,12,13];
+        shared.constructor = {[Symbol.species]: function() { return shared; }};
+        result.push(shared.map((value,index) => value+index).join(","));
+        const trapped = [];
+        const proxySource = [2,4];
+        proxySource.constructor = {[Symbol.species]: function(length) {
+            return new Proxy(new Array(length), {
+                defineProperty(target,key,desc) {
+                    trapped.push(key + ":" + desc.writable + ":" + desc.enumerable + ":" + desc.configurable);
+                    return Reflect.defineProperty(target,key,desc);
+                }
+            });
+        }};
+        result.push(proxySource.map(x=>x+1).join(","), trapped.join(","));
+        let caught = false;
+        const restricted = [1,2];
+        restricted.constructor = {[Symbol.species]: function(length) {
+            const out = new Array(length);
+            Object.defineProperty(out,"0",{value:7,configurable:false});
+            return out;
+        }};
+        try { restricted.map(x=>x); } catch { caught = true; }
+        result.push(caught);
+        result.join("|");
+    "#;
+    let expected = JsRuntime::with_gc_opcode_budget(1).unwrap().eval(source).unwrap();
+    for required in [false, true] {
+        let mut runtime = JsRuntime::new();
+        runtime.set_jit_required(required);
+        assert_eq!(runtime.eval(source).unwrap(), expected);
+        runtime.collect_garbage();
+        if required {
+            assert_no_interpreter(&mut runtime);
+        }
+    }
+}
+
+#[test]
+fn jit_numeric_calls_preserve_many_arguments_captures_and_errors() {
+    for required in [false, true] {
+        let mut runtime = JsRuntime::new();
+        runtime.set_jit_required(required);
+        assert_eq!(
+            runtime
+                .eval(
+                    "function sum(a,b,c,d,e,f,g,h,i) { return a+b+c+d+e+f+g+h+i; } \
+             sum(1,2,3,4,5,6,7,8,9);"
+                )
+                .unwrap(),
+            JsValue::Number(45.0)
+        );
+        assert!(runtime.jit_stats().optimized_calls > 0);
+        let before = runtime.jit_stats().optimized_calls;
+        assert_eq!(
+            runtime
+                .eval(
+                    "function make(a,b,c,d,e,f,g,h,i) { \
+             return function(x) { a += x; return a+b+c+d+e+f+g+h+i; }; } \
+             const update = make(1,2,3,4,5,6,7,8,9); update(10) + update(20);"
+                )
+                .unwrap(),
+            JsValue::Number(130.0)
+        );
+        assert_eq!(runtime.jit_stats().optimized_calls - before, 2);
+        runtime.collect_garbage();
+        assert_eq!(runtime.eval("update(0);").unwrap(), JsValue::Number(75.0));
+        assert_eq!(
+            runtime
+                .eval(
+                    "function identity(value) { return value; } const object = {value:37}; \
+             identity(object) === object && identity('text') === 'text';"
+                )
+                .unwrap(),
+            JsValue::Boolean(true)
+        );
+        assert_eq!(
+            runtime
+                .eval(
+                    "function makeThrow(value) { return function(delta) { value += delta; \
+             if (delta < 0) throw value; return value; }; } \
+             const throwing = makeThrow(17); let caught = 0; \
+             try { throwing(-3); } catch(error) { caught = error; } \
+             caught + throwing(2);"
+                )
+                .unwrap(),
+            JsValue::Number(30.0)
+        );
+        if required {
+            assert_no_interpreter(&mut runtime);
+        }
+    }
+}
+
+#[test]
+fn jit_array_mutations_preserve_descriptors_prototypes_and_partial_effects() {
+    let source = r#"
+        const results = [];
+        const array = [];
+        for (let i = 0; i < 1000; i++) {
+            if (array.push(i, i + 1) !== 2 || array.pop() !== i + 1 || array.pop() !== i)
+                throw "dense mutation mismatch";
+        }
+        results.push(array.length, array.pop() === undefined, array.push());
+        array.push(1);
+        Object.defineProperty(array, "length", {writable:false});
+        try { array.push(2); } catch { results.push(array.length, array[0]); }
+        try { array.pop(); } catch { results.push(array.length, 0 in array); }
+
+        let calls = 0;
+        const prototype = Object.create(Array.prototype);
+        Object.defineProperty(prototype, "0", {set(value) { calls += value; }, configurable:true});
+        const inherited = [];
+        Object.setPrototypeOf(inherited, prototype);
+        results.push(inherited.push(7), calls, inherited.hasOwnProperty("0"), inherited.pop());
+        delete prototype[0];
+        results.push(inherited.push(9), inherited.pop());
+
+        const holes = [1, , 3];
+        Object.defineProperty(prototype, "1", {get() { calls++; return 23; }, configurable:true});
+        Object.setPrototypeOf(holes, prototype);
+        results.push(holes.pop(), holes.pop(), holes.pop(), calls);
+        const accessor = [1];
+        Object.defineProperty(accessor, "0", {get() { return 19; }, configurable:true});
+        results.push(accessor.pop(), accessor.length);
+        const fixed = [11];
+        Object.defineProperty(fixed, "0", {configurable:false});
+        try { fixed.pop(); } catch { results.push(fixed[0], fixed.length); }
+        const closed = [];
+        Object.preventExtensions(closed);
+        try { closed.push(17); } catch { results.push(closed.length); }
+        const frozen = Object.freeze([3]);
+        try { frozen.pop(); } catch { results.push(frozen[0], frozen.length); }
+
+        const partial = [];
+        const partialPrototype = Object.create(Array.prototype);
+        Object.defineProperty(partialPrototype, "1", {set() { throw 29; }});
+        Object.setPrototypeOf(partial, partialPrototype);
+        try { partial.push(5, 6); } catch { results.push(partial[0], partial.length); }
+        const target = [];
+        const events = [];
+        const proxy = new Proxy(target, {
+            set(object, key, value) { events.push("set:" + key); return Reflect.set(object, key, value); },
+            deleteProperty(object, key) { events.push("delete:" + key); return Reflect.deleteProperty(object, key); }
+        });
+        proxy.push(31); proxy.pop();
+        results.push(events.join(","));
+        results.join("|");
+    "#;
+    let expected = JsRuntime::with_gc_opcode_budget(1).unwrap().eval(source).unwrap();
+    for required in [false, true] {
+        let mut runtime = JsRuntime::new();
+        runtime.set_jit_required(required);
+        assert_eq!(runtime.eval(source).unwrap(), expected);
+        if required {
+            assert_no_interpreter(&mut runtime);
+        }
+    }
+}
+
+#[test]
+fn jit_dense_pop_preserves_length_descriptors_and_tail_identity() {
+    let source = r#"
+        const results = [];
+        const object = {value: 7};
+        const array = [1, object, undefined];
+        array.label = "retained";
+        Object.defineProperty(array, "length", {writable: true});
+        results.push(array.pop() === undefined, array.pop() === object, array.pop(), array.length,
+                     array.label, Object.keys(array).join(","));
+        let descriptor = Object.getOwnPropertyDescriptor(array, "length");
+        results.push(descriptor.value, descriptor.writable, descriptor.enumerable, descriptor.configurable);
+        array.push(9);
+        results.push(array.pop(), array.hasOwnProperty("0"), Object.getOwnPropertyDescriptor(array, "0") === undefined);
+        array.length = 3;
+        results.push(0 in array, 1 in array, 2 in array);
+        array[2] = object;
+        results.push(array.pop() === object, array.length);
+
+        const prototype = Object.create(Array.prototype);
+        let calls = 0;
+        Object.defineProperty(prototype, "0", {get() { calls++; return 23; }, configurable:true});
+        const inherited = [11];
+        Object.setPrototypeOf(inherited, prototype);
+        results.push(inherited.pop(), calls);
+        inherited.length = 1;
+        results.push(inherited.pop(), calls);
+
+        const readonlyElement = [17];
+        Object.defineProperty(readonlyElement, "0", {writable:false, configurable:true});
+        results.push(readonlyElement.pop(), readonlyElement.length);
+        const fixed = [19];
+        Object.defineProperty(fixed, "0", {configurable:false});
+        try { fixed.pop(); } catch { results.push(fixed[0], fixed.length); }
+        const accessor = [29];
+        Object.defineProperty(accessor, "0", {get() { calls++; return 31; }, configurable:true});
+        results.push(accessor.pop(), accessor.length, calls);
+        results.join("|");
+    "#;
+    let expected = JsValue::String(
+        "true|true|1|0|retained|label|0|true|false|false|9|false|true|false|false|false|true|2|11|0|23|1|17|0|19|1|31|0|2".into(),
+    );
+    for required in [false, true] {
+        let mut runtime = JsRuntime::with_gc_opcode_budget(1).unwrap();
+        runtime.set_jit_required(required);
+        assert_eq!(runtime.eval(source).unwrap(), expected);
+        if required {
+            assert_no_interpreter(&mut runtime);
+        }
+    }
+}
+
+#[test]
+fn jit_shared_regexp_matchers_preserve_live_state_captures_and_reentrancy() {
+    let source = r#"
+        const first = /(?<word>a+)(b)?/dg;
+        const second = /(?<word>a+)(b)?/dg;
+        const result = [];
+        first.lastIndex = 1;
+        const match = first.exec("zaab aa");
+        result.push(match[0], match[1], match[2], match.index, first.lastIndex, second.lastIndex,
+                    match.groups.word, match.indices[0].join(","), match.indices[1].join(","));
+        result.push(RegExp.lastMatch, RegExp.$1, RegExp.$2, RegExp.lastParen, RegExp.leftContext, RegExp.rightContext);
+        second.exec("aaa");
+        result.push(RegExp.lastMatch, RegExp.$1, RegExp.$2, first.lastIndex, second.lastIndex);
+        result.push(first.exec("z") === null, first.lastIndex, RegExp.lastMatch);
+        const ordinary = /(x)/;
+        let calls = 0;
+        ordinary.lastIndex = {valueOf() { calls++; /(nested)/.exec("nested"); return 100; }};
+        result.push(ordinary.exec("x")[1], calls, RegExp.lastMatch);
+        first.compile("c", "y");
+        first.lastIndex = 1;
+        result.push(first.exec("ac")[0], first.lastIndex, second.exec("aaaa") === null);
+        result.push(/(.)/u.exec("\ud83d\ude00")[1].length, /(.)/.exec("\ud83d\ude00")[1].length);
+        result.join("|");
+    "#;
+    let expected = JsRuntime::with_gc_opcode_budget(1).unwrap().eval(source).unwrap();
+    for required in [false, true] {
+        let mut runtime = JsRuntime::new();
+        runtime.set_jit_required(required);
+        assert_eq!(runtime.eval(source).unwrap(), expected);
+        runtime.collect_garbage();
+        if required {
+            assert_no_interpreter(&mut runtime);
+        }
+    }
+}
+
+#[test]
+fn jit_native_bitwise_loops_match_conversion_and_shift_semantics() {
+    for (value, shift) in [
+        ("-1.75", "-1"),
+        ("4294967297.75", "32"),
+        ("9007199254740991", "33"),
+        ("1e30", "1e30"),
+        ("NaN", "NaN"),
+        ("Infinity", "-Infinity"),
+    ] {
+        let source = format!(
+            "function compute(value, shift) {{ Symbol(); let total = 0; \
+             for (let i = 0; i < 2000; i++) total += ((value & i) ^ (value | i)) \
+             + (value << shift) + (value >> shift) + (value >>> shift); \
+             return total; }} compute({value}, {shift});"
+        );
+        let expected = JsRuntime::with_gc_opcode_budget(1).unwrap().eval(&source).unwrap();
+        for required in [false, true] {
+            let mut runtime = JsRuntime::new();
+            runtime.set_jit_required(required);
+            assert_eq!(runtime.eval(&source).unwrap(), expected, "{value}, {shift}, required={required}");
+            assert!(runtime.jit_stats().native_loop_opcodes > 0);
+            if required {
+                assert_no_interpreter(&mut runtime);
+            }
+        }
+    }
+}
+
+#[test]
+fn jit_native_uint32_loops_preserve_aliases_offsets_and_assignment_results() {
+    let source = r#"
+        function compute(n) {
+            const buffer = new ArrayBuffer(1056);
+            const values = new Uint32Array(buffer, 16, 256);
+            const alias = new Uint32Array(buffer);
+            const bytes = new Uint8Array(buffer);
+            let checksum = 0;
+            for (let i = 0; i < n; i++) {
+                const index = i & 255;
+                values[index] = (values[index] + i * 17 + 3) >>> 0;
+                checksum += values[index];
+            }
+            if (alias[4] !== values[0] || alias[259] !== values[255] || alias[0] !== 0)
+                throw "alias/offset mismatch";
+            const data = new DataView(buffer);
+            if (data.getUint32(16, true) !== values[0] && data.getUint32(16, false) !== values[0])
+                throw "buffer bytes mismatch";
+            return checksum + values[0] + bytes[0];
+        }
+        compute(2000);
+    "#;
+    let mut interpreted = JsRuntime::with_gc_opcode_budget(1).unwrap();
+    let expected = interpreted.eval(source).unwrap();
+    for required in [false, true] {
+        let mut runtime = JsRuntime::new();
+        runtime.set_jit_required(required);
+        assert_eq!(runtime.eval(source).unwrap(), expected);
+        let stats = runtime.jit_stats();
+        assert!(stats.native_loop_opcodes > 50000, "{stats:?}");
+        assert_eq!(executed_bytecodes(&mut runtime), executed_bytecodes(&mut interpreted));
+        runtime.collect_garbage();
+        assert_eq!(runtime.eval("compute(2000);").unwrap(), expected);
+        if required {
+            assert_no_interpreter(&mut runtime);
+        }
+    }
+
+    for value in ["-1.5", "4294967297.75", "9007199254740991", "1e30", "NaN", "Infinity", "-Infinity"] {
+        let source = format!(
+            "function assign(value) {{ const values = new Uint32Array(8); let result = 0; \
+             for (let i = 0; i < 2000; i++) {{ const index = i & 7; result = (values[index] = value); }} \
+             return [String(result), values[0], values[7]].join(':'); }} assign({value});"
+        );
+        let expected = JsRuntime::with_gc_opcode_budget(1).unwrap().eval(&source).unwrap();
+        for required in [false, true] {
+            let mut runtime = JsRuntime::new();
+            runtime.set_jit_required(required);
+            assert_eq!(runtime.eval(&source).unwrap(), expected, "value={value}, required={required}");
+            assert!(runtime.jit_stats().native_loop_opcodes > 0);
+        }
+    }
+}
+
+#[test]
+fn jit_native_uint32_loops_guard_unsupported_views_and_effects() {
+    for initializer in [
+        "new Uint32Array(8)",
+        "new Int32Array(256)",
+        "new Uint32Array(new SharedArrayBuffer(1024))",
+        "new Uint32Array(new ArrayBuffer(1024, {maxByteLength:2048}))",
+        "new Proxy(new Uint32Array(256), {get(target, key) { return target[key]; }, set(target,key,value) { target[key]=value; return true; }})",
+        "[1,2,3,4,5,6,7,8]",
+    ] {
+        let source = format!(
+            "function compute(n) {{ const values = {initializer}; let total = 0; \
+             for (let i = 0; i < n; i++) {{ const index = i & 255; values[index] = i; total += values[index]; }} \
+             return String(total); }} compute(2000);"
+        );
+        let expected = JsRuntime::with_gc_opcode_budget(1).unwrap().eval(&source).unwrap();
+        for required in [false, true] {
+            let mut runtime = JsRuntime::new();
+            runtime.set_jit_required(required);
+            assert_eq!(runtime.eval(&source).unwrap(), expected, "{initializer}");
+            assert_eq!(runtime.jit_stats().native_loop_opcodes, 0, "{initializer}");
+        }
+    }
+    let source = r#"
+        function compute() {
+            const values = new Uint32Array(256);
+            const alias = new Uint32Array(values.buffer);
+            let total = 0;
+            for (let i = 0; i < 2000; i++) {
+                const index = i & 255;
+                values[index] = i;
+                total += alias[index];
+            }
+            return total;
+        }
+        compute();
+    "#;
+    let expected = JsRuntime::with_gc_opcode_budget(1).unwrap().eval(source).unwrap();
+    for required in [false, true] {
+        let mut runtime = JsRuntime::new();
+        runtime.set_jit_required(required);
+        assert_eq!(runtime.eval(source).unwrap(), expected);
+        assert_eq!(runtime.jit_stats().native_loop_opcodes, 0);
+    }
+}
+
+#[test]
+fn jit_native_uint32_loops_commit_before_each_gc_slice() {
+    use javascript::JsRunStatus;
+    let source = r#"
+        const values = new Uint32Array(256);
+        function compute(n) {
+            const array = values;
+            let total = 0;
+            for (let i = 0; i < n; i++) {
+                const index = i & 255;
+                array[index] = i;
+                total += array[index];
+            }
+            return total;
+        }
+        compute(1500);
+    "#;
+    let mut reference = JsRuntime::with_gc_opcode_budget(1).unwrap();
+    let expected = reference.eval(source).unwrap();
+    for required in [false, true] {
+        for budget in [1, 31, 64, 127, 1000] {
+            let mut runtime = JsRuntime::new();
+            runtime.set_jit_required(required);
+            runtime.start_eval(source).unwrap();
+            loop {
+                let before = executed_bytecodes(&mut runtime);
+                let status = runtime.run_slice(budget).unwrap();
+                let count = executed_bytecodes(&mut runtime) - before;
+                assert!(count > 0 && count <= budget as u64);
+                runtime.collect_garbage();
+                if let JsRunStatus::Complete(value) = status {
+                    assert_eq!(value, expected);
+                    break;
+                }
+                assert_eq!(count, budget as u64);
+            }
+            assert_eq!(executed_bytecodes(&mut runtime), executed_bytecodes(&mut reference));
+            if budget == 1000 {
+                assert!(runtime.jit_stats().native_loop_opcodes > 0);
+            }
+            assert_eq!(runtime.eval("values[0] + values[255];").unwrap(), JsValue::Number(2559.0));
+        }
+    }
+}
+
 fn assert_baseline_matches(source: &str, expected: JsValue) {
     let interpreted = JsRuntime::with_gc_opcode_budget(1).unwrap().eval(source).unwrap();
     assert_eq!(interpreted, expected);
@@ -187,6 +694,344 @@ fn jit_integer_remainder_matches_number_semantics_at_conversion_boundaries() {
         runtime.set_jit_required(required);
         assert_eq!(runtime.eval(source).unwrap(), JsValue::Boolean(true));
         assert!(runtime.jit_stats().optimized_calls >= 27 * 27 * 3);
+    }
+}
+
+#[test]
+fn jit_numeric_index_fastpaths_preserve_array_holes_accessors_and_proxy_receivers() {
+    let source = "
+        const array = [11, 22, 33];
+        const results = [array[0], array[-0], array[1]];
+        Object.defineProperty(array, '1', { get() { return this[0] + 9; } });
+        results.push(array[1]);
+        delete array[2];
+        const prototype = Object.create(Array.prototype);
+        prototype[2] = 71;
+        Object.setPrototypeOf(array, prototype);
+        results.push(array[2], array[3], array[1.5]);
+        let keys = '';
+        const proxy = new Proxy(array, { get(target, key, receiver) { keys += key + ','; return Reflect.get(target, key, receiver); } });
+        results.push(proxy[1], proxy[-0]);
+        let coercions = 0;
+        results.push(array[{ toString() { coercions++; return '0'; } }]);
+        results.join(':') + '/' + keys + '/' + coercions;
+    ";
+    assert_baseline_matches(source, JsValue::String("11:11:22:20:71:::20:11:11/1,0,0,/1".into()));
+}
+
+#[test]
+fn jit_typed_numeric_index_fastpaths_preserve_keys_coercion_and_aliasing() {
+    let source = "
+        const buffer = new ArrayBuffer(16);
+        const array = new Uint32Array(buffer, 4, 2);
+        const alias = new Uint32Array(buffer);
+        const value = (array[-0] = 4294967297);
+        array[1] = -1;
+        let conversions = 0;
+        array[99] = { valueOf() { conversions++; return 9; } };
+        array[NaN] = { valueOf() { conversions++; return 9; } };
+        array[-1] = { valueOf() { conversions++; return 9; } };
+        array[Infinity] = { valueOf() { conversions++; return 9; } };
+        array[1.5] = { valueOf() { conversions++; return 9; } };
+        array['-0'] = 77;
+        array['1.0'] = 83;
+        const key = { toString() { conversions++; return '1'; } };
+        array[key] = 7;
+        const results = [value, array[0], alias[1], array[1], alias[2],
+                         array['-0'], array['1.0'], array[NaN], array[Infinity], array[-1], array[1.5], conversions];
+        let errors = 0;
+        try { array[99] = 1n; } catch (error) { if (error instanceof TypeError) errors++; }
+        const bigint = new BigInt64Array(1);
+        bigint[-0] = 18446744073709551615n;
+        try { bigint[99] = 1; } catch (error) { if (error instanceof TypeError) errors++; }
+        results.join(':') + '/' + bigint[0] + '/' + errors;
+    ";
+    assert_baseline_matches(source, JsValue::String("4294967297:1:1:7:7::83:::::6/-1/2".into()));
+}
+
+#[test]
+fn jit_typed_numeric_index_fastpaths_recheck_buffers_after_value_coercion() {
+    let source = "
+        const buffer = new ArrayBuffer(16, { maxByteLength: 32 });
+        const tracking = new Uint32Array(buffer);
+        const fixed = new Uint32Array(buffer, 4, 2);
+        tracking[0] = 11; tracking[1] = 22; fixed[1] = 33;
+        const results = [fixed[0], fixed[1]];
+        tracking[3] = { valueOf() { buffer.resize(8); return 99; } };
+        results.push(tracking[0], tracking[1], tracking[2], fixed[0], fixed[1]);
+        buffer.resize(16);
+        results.push(tracking[2], fixed[0], fixed[1]);
+        fixed[1] = { valueOf() { buffer.resize(4); return 88; } };
+        results.push(fixed[1], tracking[0]);
+        buffer.resize(16);
+        results.push(fixed[1]);
+        const detached = new Uint8Array([7]);
+        const transferred = detached.buffer.transfer();
+        let conversions = 0;
+        detached[0] = { valueOf() { conversions++; return 9; } };
+        results.push(detached[0], conversions, new Uint8Array(transferred)[0]);
+        results.join(':');
+    ";
+    assert_baseline_matches(source, JsValue::String("22:33:11:22::::0:22:0::11:0::1:7".into()));
+}
+
+#[test]
+fn jit_typed_index_fastpaths_preserve_all_element_encodings_and_shared_aliases() {
+    let source = "
+        const constructors = [Int8Array, Uint8Array, Uint8ClampedArray, Int16Array, Uint16Array,
+                              Int32Array, Uint32Array, Float16Array, Float32Array, Float64Array];
+        const values = [-0, -1, 257, 1.5, -2.5, Infinity, NaN];
+        let valid = true;
+        for (const Constructor of constructors) {
+            for (const value of values) {
+                const array = new Constructor(2);
+                const expected = new Constructor([value]);
+                array[1] = value;
+                const alias = new Constructor(array.buffer);
+                if (!Object.is(array[1], expected[0]) || !Object.is(alias[1], expected[0])) valid = false;
+                const bytes = new Uint8Array(array.buffer);
+                const expectedBytes = new Uint8Array(expected.buffer);
+                for (let i = 0; i < expectedBytes.length; i++) {
+                    if (bytes[i + Constructor.BYTES_PER_ELEMENT] !== expectedBytes[i]) valid = false;
+                }
+            }
+        }
+        for (const Constructor of [BigInt64Array, BigUint64Array]) {
+            const array = new Constructor(2);
+            array[1] = -1n;
+            const alias = new Constructor(array.buffer);
+            const expected = new Constructor([-1n]);
+            if (array[1] !== expected[0] || alias[1] !== expected[0]) valid = false;
+        }
+        const shared = new SharedArrayBuffer(16);
+        const first = new Uint32Array(shared);
+        const second = new Uint32Array(shared);
+        first[-0] = 4294967297;
+        Atomics.store(second, 1, 77);
+        valid && second[0] === 1 && first[1] === 77;
+    ";
+    assert_baseline_matches(source, JsValue::Boolean(true));
+}
+
+#[test]
+fn jit_builtin_callbacks_use_guarded_native_entries_with_extra_arguments() {
+    for required in [false, true] {
+        let mut runtime = JsRuntime::new();
+        runtime.set_jit_required(required);
+        assert_eq!(
+            runtime
+                .eval(
+                    "function triple(value) { return value * 3 + 1; } \
+                 function sum(total, value) { return total + value; } \
+                 [1, 2, 3, 4].map(triple).reduce(sum, 0);"
+                )
+                .unwrap(),
+            JsValue::Number(34.0)
+        );
+        assert_eq!(runtime.jit_stats().optimized_calls, 8);
+        let before = runtime.jit_stats().optimized_calls;
+        assert_eq!(
+            runtime
+                .eval("[1, 2, 3, 4].map(value => value * 3 + 1).reduce((total, value) => total + value, 0);")
+                .unwrap(),
+            JsValue::Number(34.0)
+        );
+        assert_eq!(runtime.jit_stats().optimized_calls - before, 8);
+        assert_eq!(
+            runtime
+                .eval(
+                    "function needsArguments(value) { return arguments.length + this.bias + value; } \
+                 [1, 2].map(needsArguments, { bias: 10 }).join(',');"
+                )
+                .unwrap(),
+            JsValue::String("14,15".into())
+        );
+        assert_eq!(
+            runtime.eval("[1, 'x', 3].map(triple).join(',');").unwrap(),
+            JsValue::String("4,NaN,10".into())
+        );
+    }
+}
+
+#[test]
+fn jit_builtin_native_callbacks_preserve_capture_writes_throw_cleanup_and_roots() {
+    for required in [false, true] {
+        let mut runtime = JsRuntime::with_gc_opcode_budget(1).unwrap();
+        runtime.set_jit_required(required);
+        assert_eq!(
+            runtime
+                .eval(
+                    "function make() { let state = 40; \
+                   const update = function(value) { state = state + value; if (value < 0) throw state; return state; }; \
+                   return update; } \
+                 const update = make(); let caught = 0; let cleanup = 0; \
+                 try { [1, -1, 9].map(update); } catch (error) { caught = error; } finally { cleanup++; } \
+                 [caught, cleanup, [2].map(update)[0]].join(',');"
+                )
+                .unwrap(),
+            JsValue::String("40,1,42".into())
+        );
+        assert!(runtime.jit_stats().optimized_calls >= 3);
+        assert_eq!(
+            runtime
+                .eval(
+                    "function identity(value) { return value; } \
+                 const object = { link: [7] }; const copied = [object].map(identity); copied[0] === object;"
+                )
+                .unwrap(),
+            JsValue::Boolean(true)
+        );
+        assert_eq!(runtime.eval("copied[0].link === object.link;").unwrap(), JsValue::Boolean(true));
+    }
+}
+
+#[test]
+fn jit_ordinary_data_properties_preserve_descriptors_and_receiver_semantics() {
+    let source = "
+        const state = { value: 1, method(delta) { this.value += delta; return this.value; } };
+        const output = [state.method(2)];
+        Object.defineProperty(state, 'value', { value: 7, writable: true, enumerable: false, configurable: true });
+        output.push(state.method(3), Object.getOwnPropertyDescriptor(state, 'value').enumerable);
+        Object.preventExtensions(state);
+        state.value = 12;
+        output.push(state.value);
+        Object.defineProperty(state, 'value', { writable: false });
+        let errors = 0;
+        try { state.value = 99; } catch (error) { if (error instanceof TypeError) errors++; }
+        output.push(state.value, errors);
+        const target = { value: 17 };
+        const receiver = { value: 31 };
+        Reflect.set(target, 'value', 47, receiver);
+        output.push(target.value, receiver.value);
+        let calls = 0;
+        const accessor = { get value() { calls++; return this.other; }, set value(v) { calls++; this.other = v; }, other: 5 };
+        accessor.value = 8;
+        output.push(accessor.value, calls);
+        const proxy = new Proxy(target, {
+            get(object, key, receiver) { calls++; return Reflect.get(object, key, receiver) + 1; },
+            set(object, key, value, receiver) { calls++; return Reflect.set(object, key, value * 2, receiver); }
+        });
+        proxy.value = 9;
+        output.push(proxy.value, target.value, calls);
+        const frozen = Object.freeze({ value: 73 });
+        try { frozen.value = 99; } catch (error) { if (error instanceof TypeError) errors++; }
+        output.push(frozen.value, errors);
+        output.join(',');
+    ";
+    assert_baseline_matches(source, JsValue::String("3,10,false,12,12,1,17,47,8,2,19,18,4,73,2".into()));
+}
+
+#[test]
+fn jit_ordinary_data_properties_preserve_globals_fields_and_prototype_changes() {
+    let source = "
+        var globalValue = 7;
+        globalThis.globalValue = 11;
+        const output = [globalValue];
+        const prototype = { value: 17 };
+        const object = Object.create(prototype);
+        output.push(object.value);
+        object.value = 19;
+        prototype.value = 23;
+        output.push(object.value);
+        delete object.value;
+        output.push(object.value);
+        Object.defineProperty(prototype, 'value', { get() { return this.own + 5; } });
+        object.own = 31;
+        output.push(object.value);
+        class Base { set value(v) { output.push(v); } }
+        class Derived extends Base { value = 37; }
+        const derived = new Derived();
+        output.push(derived.value);
+        const boxed = new String('abc');
+        output.push(boxed.length, boxed[0]);
+        const callable = function(value) { return value; };
+        output.push(callable.prototype.constructor === callable);
+        output.join(',');
+    ";
+    assert_baseline_matches(source, JsValue::String("11,17,19,23,36,37,3,a,true".into()));
+}
+
+#[test]
+fn jit_numeric_collection_hints_preserve_mutation_order_and_same_value_zero() {
+    let source = "
+        const map = new Map();
+        const set = new Set();
+        let valid = true;
+        for (let i = 0; i < 64; i++) { map.set(i, i * 3); set.add(i); }
+        for (let i = 0; i < 64; i++) {
+            if (map.get(i) !== i * 3 || !map.has(i) || !set.has(i)) valid = false;
+        }
+        for (let i = 0; i < 64; i += 2) {
+            if (!map.delete(i) || !set.delete(i) || map.has(i) || set.has(i)) valid = false;
+        }
+        for (let i = 1; i < 64; i += 2) {
+            if (map.get(i) !== i * 3 || !set.has(i)) valid = false;
+            map.set(i, i * 5);
+        }
+        map.set(NaN, 11); set.add(NaN);
+        map.set(-0, 17); set.add(-0);
+        if (map.get(0) !== 17 || map.get(Number('not a number')) !== 11 || !set.has(0) || !set.has(NaN)) valid = false;
+        map.delete(NaN); set.delete(NaN);
+        map.set(NaN, 19); set.add(NaN);
+        if (map.get(NaN) !== 19 || !set.has(NaN)) valid = false;
+        const expectedOrder = [];
+        for (let i = 1; i < 64; i += 2) expectedOrder.push(i);
+        expectedOrder.push(0, NaN);
+        if (Array.from(map.keys()).join(',') !== expectedOrder.join(',') ||
+            Array.from(set.values()).join(',') !== expectedOrder.join(',')) valid = false;
+        map.clear(); set.clear();
+        for (let i = 63; i >= 0; i--) { map.set(i, -i); set.add(i); }
+        for (let i = 0; i < 64; i++) {
+            if (map.get(i) !== -i || !set.has(i)) valid = false;
+        }
+        const object = {};
+        const symbol = Symbol('key');
+        for (const key of [object, symbol, '17', 17n, true, null, undefined]) { map.set(key, key); set.add(key); }
+        for (const key of [object, symbol, '17', 17n, true, null, undefined]) {
+            if (!Object.is(map.get(key), key) || !set.has(key)) valid = false;
+        }
+        let noCoercion = 0;
+        const key = { valueOf() { noCoercion++; return 17; }, toString() { noCoercion++; return '17'; } };
+        if (map.has(key) || set.has(key) || noCoercion !== 0) valid = false;
+        valid;
+    ";
+    assert_baseline_matches(source, JsValue::Boolean(true));
+}
+
+#[test]
+fn jit_numeric_collection_hints_preserve_reentrant_foreach_and_gc_isolation() {
+    for required in [false, true] {
+        let mut runtime = JsRuntime::with_gc_opcode_budget(1).unwrap();
+        runtime.set_jit_required(required);
+        assert_eq!(
+            runtime
+                .eval(
+                    "const map = new Map(); const set = new Set(); \
+                 for (let i = 0; i < 32; i++) { map.set(i, i); set.add(i); } \
+                 for (let i = 0; i < 32; i++) { map.get(i); set.has(i); } \
+                 const visited = []; map.forEach((value, key) => { \
+                     visited.push(key); if (key === 0) { map.delete(1); map.set(32, 32); } \
+                 }); \
+                 const setVisited = []; set.forEach(value => { \
+                     setVisited.push(value); if (value === 0) { set.delete(1); set.add(32); } \
+                 }); \
+                 visited.join(',') === setVisited.join(',') && visited.length === 32 && map.get(32) === 32;"
+                )
+                .unwrap(),
+            JsValue::Boolean(true)
+        );
+        assert_eq!(
+            runtime
+                .eval(
+                    "let correct = true; for (let round = 0; round < 40; round++) { \
+                    const temporary = new Map(); const temporarySet = new Set(); \
+                    for (let i = 0; i < 40; i++) { temporary.set(i, round * 100 + i); temporarySet.add(i); } \
+                    for (let i = 0; i < 40; i++) { if (temporary.get(i) !== round * 100 + i || !temporarySet.has(i)) correct = false; } \
+                 } correct && map.get(17) === 17 && set.has(17);"
+                )
+                .unwrap(),
+            JsValue::Boolean(true)
+        );
     }
 }
 

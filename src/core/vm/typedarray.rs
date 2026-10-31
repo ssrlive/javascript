@@ -222,6 +222,50 @@ pub(crate) fn coerce_typed_array_value(n: f64, ta_name: &str) -> f64 {
 }
 
 impl<'gc> VM<'gc> {
+    #[cfg(feature = "jit")]
+    pub(super) fn native_uint32_loop_buffer(&self, arr: &ArrayHandle<'gc>, length: usize) -> Option<(ArrayHandle<'gc>, usize)> {
+        let view = arr.borrow();
+        if !matches!(view.props.get("__typedarray_name__"), Some(Value::String(name)) if crate::utf16_to_utf8(name) == "Uint32Array")
+            || view.elements.len() < length
+            || !matches!(view.props.get("__bytes_per_element__"), Some(Value::Number(4.0)))
+        {
+            return None;
+        }
+        let Some(Value::Object(buffer)) = view.props.get("__typedarray_buffer__") else {
+            return None;
+        };
+        let buffer = buffer.borrow();
+        if ["__detached__", "__resizable__", "__immutable__"]
+            .iter()
+            .any(|key| matches!(buffer.get(*key), Some(Value::Boolean(true))))
+            || buffer.contains_key("__shared_buffer_id__")
+            || !matches!(buffer.get("__type__"), Some(Value::String(name)) if crate::utf16_to_utf8(name) == "ArrayBuffer")
+        {
+            return None;
+        }
+        let Some(Value::Number(offset)) = view.props.get("__byte_offset__") else {
+            return None;
+        };
+        if *offset < 0.0 || !offset.is_finite() || offset.fract() != 0.0 {
+            return None;
+        }
+        let offset = *offset as usize;
+        let end = offset.checked_add(length.checked_mul(4)?)?;
+        let Some(Value::Number(byte_length)) = buffer.get("byteLength") else {
+            return None;
+        };
+        if !byte_length.is_finite() || byte_length.fract() != 0.0 || end as f64 > *byte_length {
+            return None;
+        }
+        let Some(Value::Array(bytes)) = buffer.get("__buffer_bytes__") else {
+            return None;
+        };
+        if Gc::as_ptr(*bytes) == Gc::as_ptr(*arr) || end > bytes.borrow().elements.len() {
+            return None;
+        }
+        Some((*bytes, offset))
+    }
+
     /// Check whether a TypedArray's underlying ArrayBuffer is detached.
     /// `arr` must be a ArrayHandle that has `__typedarray_name__` in props.
     pub(crate) fn is_typed_array_buffer_detached(arr: &ArrayHandle<'gc>) -> bool {
@@ -3262,27 +3306,44 @@ impl<'gc> VM<'gc> {
         };
         if let Some(Value::Object(buf_obj)) = buffer {
             let base = byte_offset + idx * bpe;
-            let mut raw_values = vec![Value::Number(0.0); bpe];
+            let mut inline_values: [Value<'gc>; 8] = std::array::from_fn(|_| Value::Number(0.0));
+            let mut overflow_values = Vec::new();
+            let raw_values = if bpe <= inline_values.len() {
+                &mut inline_values[..bpe]
+            } else {
+                overflow_values.resize(bpe, Value::Number(0.0));
+                overflow_values.as_mut_slice()
+            };
             if ta_name == "BigInt64Array" || ta_name == "BigUint64Array" {
                 if let Some(Value::BigInt(bigint_val)) = arr.borrow().elements.get(idx).cloned() {
-                    Self::encode_typed_element_bigint(&mut raw_values, 0, ta_name, &bigint_val);
+                    Self::encode_typed_element_bigint(raw_values, 0, ta_name, &bigint_val);
                 }
             } else {
-                Self::encode_typed_element(&mut raw_values, 0, bpe, ta_name, new_num);
+                Self::encode_typed_element(raw_values, 0, bpe, ta_name, new_num);
             }
-            let raw = raw_values.iter().map(|v| to_number(v) as u8).collect::<Vec<_>>();
 
             if let Some(Value::Array(buf_bytes)) = buf_obj.borrow().get("__buffer_bytes__").cloned() {
                 let mut bb = buf_bytes.borrow_mut(ctx);
-                for (j, &b) in raw.iter().enumerate() {
+                for (j, value) in raw_values.iter().enumerate() {
                     if base + j < bb.elements.len() {
-                        bb.elements[base + j] = Value::Number(b as f64);
+                        bb.elements[base + j] = Value::Number(to_number(value) as u8 as f64);
                     }
                 }
             }
 
             if let Some(shared_id) = self.shared_buffer_id_from_obj(&buf_obj) {
-                let _ = crate::js_agent::shared_buffer_write(shared_id, base, &raw);
+                let mut inline_bytes = [0u8; 8];
+                let mut overflow_bytes = Vec::new();
+                let raw = if bpe <= inline_bytes.len() {
+                    &mut inline_bytes[..bpe]
+                } else {
+                    overflow_bytes.resize(bpe, 0);
+                    overflow_bytes.as_mut_slice()
+                };
+                for (byte, value) in raw.iter_mut().zip(raw_values.iter()) {
+                    *byte = to_number(value) as u8;
+                }
+                let _ = crate::js_agent::shared_buffer_write(shared_id, base, raw);
             }
         }
     }

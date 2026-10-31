@@ -1,6 +1,36 @@
 use crate::core::{Chunk, Opcode, Value as JsValue};
-use cranelift_codegen::ir::{InstBuilder, MemFlagsData, Value, condcodes::FloatCC, types};
+use cranelift_codegen::ir::{
+    InstBuilder, MemFlagsData, Value,
+    condcodes::{FloatCC, IntCC},
+    types,
+};
 use cranelift_frontend::FunctionBuilder;
+
+pub(super) fn to_uint32(builder: &mut FunctionBuilder<'_>, value: Value) -> Value {
+    // Extract the truncated integer modulo 2^32, including huge and nonfinite
+    // inputs, without trapping conversions or a floating-point remainder call.
+    let bits = builder.ins().bitcast(types::I64, MemFlagsData::new(), value);
+    let exponent = builder.ins().ushr_imm_u(bits, 52);
+    let exponent = builder.ins().band_imm_u(exponent, 2047);
+    let fraction = builder.ins().band_imm_u(bits, 0x000f_ffff_ffff_ffff);
+    let mantissa = builder.ins().bor_imm_u(fraction, 1i64 << 52);
+    let midpoint = builder.ins().iconst(types::I64, 1075);
+    let right_shift = builder.ins().isub(midpoint, exponent);
+    let right = builder.ins().ushr(mantissa, right_shift);
+    let left_shift = builder.ins().iadd_imm_s(exponent, -1075);
+    let left = builder.ins().ishl(mantissa, left_shift);
+    let small = builder.ins().icmp_imm_u(IntCC::UnsignedLessThanOrEqual, exponent, 1075);
+    let integer = builder.ins().select(small, right, left);
+    let lower = builder.ins().icmp_imm_u(IntCC::UnsignedGreaterThanOrEqual, exponent, 1023);
+    let upper = builder.ins().icmp_imm_u(IntCC::UnsignedLessThan, exponent, 1107);
+    let valid = builder.ins().band(lower, upper);
+    let zero = builder.ins().iconst(types::I64, 0);
+    let integer = builder.ins().select(valid, integer, zero);
+    let negative = builder.ins().icmp_imm_s(IntCC::SignedLessThan, bits, 0);
+    let negated = builder.ins().ineg(integer);
+    let integer = builder.ins().select(negative, negated, integer);
+    builder.ins().ireduce(types::I32, integer)
+}
 
 pub(crate) enum Input {
     Stack(usize),
@@ -113,6 +143,7 @@ impl Region {
                 break;
             }
         }
+
         (arithmetic && region.count >= 4).then_some(region)
     }
 
@@ -178,6 +209,55 @@ impl Region {
                 scratch,
                 ((self.inputs.len() + index) * 8) as i32,
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod conversion_tests {
+    use super::*;
+    use cranelift_codegen::ir::AbiParam;
+    use cranelift_frontend::FunctionBuilderContext;
+    use cranelift_jit::JITModule;
+    use cranelift_module::{Linkage, Module};
+
+    #[test]
+    fn native_uint32_conversion_matches_ieee_boundaries_and_random_bits() {
+        let mut module = JITModule::new(crate::runtime::jit::native_builder().unwrap());
+        let mut context = module.make_context();
+        context.func.signature.params.push(AbiParam::new(types::F64));
+        context.func.signature.returns.push(AbiParam::new(types::I32));
+        let id = module
+            .declare_function("uint32_conversion", Linkage::Local, &context.func.signature)
+            .unwrap();
+        let mut builder_context = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_context);
+        let block = builder.create_block();
+        builder.append_block_params_for_function_params(block);
+        builder.switch_to_block(block);
+        let input = builder.block_params(block)[0];
+        let result = to_uint32(&mut builder, input);
+        builder.ins().return_(&[result]);
+        builder.seal_all_blocks();
+        builder.finalize(module.target_config());
+        module.define_function(id, &mut context).unwrap();
+        module.finalize_definitions().unwrap();
+        let function: unsafe extern "C" fn(f64) -> u32 = unsafe { std::mem::transmute(module.get_finalized_function(id)) };
+        for exponent in 0..=2047u64 {
+            for fraction in [0, 1, 0x0008_0000_0000_0000, 0x000f_ffff_ffff_ffff] {
+                for sign in [0, 1u64 << 63] {
+                    let value = f64::from_bits(sign | (exponent << 52) | fraction);
+                    assert_eq!(unsafe { function(value) }, crate::core::vm::to_uint32(value), "{value:?}");
+                }
+            }
+        }
+        let mut bits = 17u64;
+        for _ in 0..100000 {
+            bits ^= bits << 13;
+            bits ^= bits >> 7;
+            bits ^= bits << 17;
+            let value = f64::from_bits(bits);
+            assert_eq!(unsafe { function(value) }, crate::core::vm::to_uint32(value), "{value:?}");
         }
     }
 }

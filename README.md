@@ -139,6 +139,69 @@ uses guarded integer division for exactly representable signed integers, with
 non-finite values, zero divisors, and conversion/overflow boundaries retain the
 floating-point helper, rather than approximating `%` using floating subtraction.
 
+Builtin helper calls (including Array callbacks) also enter precompiled
+functions when their used arguments and captures satisfy those same guards.
+Unnamed inline callbacks are discovered from bytecode function constants and
+compiled only by the restricted bytecode backend, without AST fallback.
+Unused extra callback arguments do not prevent specialization; code observing
+`arguments` or `this`, named self bindings, constructors, and unsupported values
+retain the existing VM call path. Native callback throws propagate across the
+original helper boundary, with captured writes committed and roots restored.
+
+Capture-free numeric helper callbacks with up to eight used arguments can enter
+the same compiled code using a stack-sized tagged frame, without temporary VM
+stack operands or GC root copies. Opaque identity values, captures, larger frames
+and unsupported argument types retain the existing rooted call protocol.
+
+Array `map`/`reduce` read verified ordinary dense own elements directly and
+recheck the live array on every iteration. Holes, accessors, TypedArrays and
+callback mutations retain generic lookup. Creating data properties in existing
+ordinary array slots can also bypass descriptor-object construction when the
+slot is unrestricted; species still executes normally, and proxies, integrity
+restrictions and existing descriptors retain generic definitions. These are
+helper optimizations, not native Array loop lowering.
+`Array.pop` can remove a verified ordinary dense tail directly, including arrays
+with writable length descriptors and unrelated named properties. Each call
+checks the live logical length, tail presence and descriptors, and length
+writability. Holes, accessors, fixed elements, sealed/frozen arrays, TypedArrays
+and proxy receivers retain the generic deletion and length-update protocol.
+Cached RegExp matchers share immutable compiled storage rather than cloning
+their instruction tables for each execution; cache hits use borrowed pattern
+and flag keys. Match state and `lastIndex` remain
+per execution/receiver. Unchanged UTF-16 inputs are borrowed, and legacy RegExp
+static captures are updated in place without reallocating property keys or
+changing their observable values.
+
+Numeric indexed access avoids property-key construction for real TypedArrays
+and verified existing dense-array elements. TypedArray writes reuse the ordinary
+property setter's coercion and post-coercion detached/resizable-buffer checks;
+numeric `-0` remains key `"0"`, while string `"-0"` remains invalid. Buffer writes
+use stack-sized encoding scratch space for standard element widths. Array
+accessors, holes, inherited properties, proxy receivers, and coercible keys keep
+their generic paths.
+
+Hot balanced numeric loops can additionally lower bitwise operations and bounded
+indexed access on one fixed, unshared `Uint32Array` to native instructions. Index
+bounds must be proven from constants or nonnegative bitwise masks (up to 1,024
+elements); numeric constants and the live view are revalidated at each batch.
+The referenced buffer prefix is copied into numeric scratch at entry and writes
+are synchronized to both view elements and backing bytes before returning to the
+VM. There are no opcode helpers or VM stack operations inside the native body.
+Per-iteration scalar bindings remain in SSA values; batches retain the ordinary
+opcode budget and GC boundaries. Exact inline IEEE-754 conversion implements
+wrapping `ToUint32`, including fractional, huge, negative and nonfinite inputs.
+Multiple views inside one loop, shared/resizable/detached/immutable buffers,
+unproven indices, other element types, calls and internal branches retain their
+existing execution paths. This is not general native object or TypedArray support.
+
+Map/Set numeric lookups keep bounded position hints for collections with at least
+16 entries. Every hit checks the current entry with SameValueZero; stale positions
+and misses use the existing linear search. The hints contain only address tokens,
+numeric key bits, and positions, never GC references, and the per-VM table is capped
+at 1,024 hints. Deletion preserves insertion order. This is not a general hash-table
+replacement: other key types, cold lookups, and unsupported collection operations
+retain their existing paths.
+
 For JIT tests, call `JsRuntime::set_jit_required(true)` to require both top-level
 script bytecode and JavaScript function bodies to enter compiled code. Eligible
 numeric calls use the existing optimizing backend immediately. Other supported
@@ -448,6 +511,33 @@ The standalone comparison script runs the same JavaScript workloads under Node.j
 ```
 
 Use `--runs`, `--warmup`, and `--iterations` to adjust the workload. It reports in-script and end-to-end timings and verifies matching checksums. The in-script timer uses JavaScript `Date.now()` (millisecond resolution), so increase `--iterations` when Node.js measurements are only a few milliseconds. Results are workload-specific and do not represent general performance.
+
+The default set contains 16 workloads: numeric arithmetic, inline-eligible calls,
+virtual objects/arrays, numeric generator loops, mutable closures, receiver-sensitive
+methods, own/inherited/accessor properties, Array callbacks and push/pop,
+Uint32Array access, strings, RegExp captures, Map/Set, JSON, bounded BigInt,
+throw/optional-catch/finally control flow, and repeated generator resumes.
+JSON and BigInt run `ceil(iterations / 10)` operations per round; other workloads
+use `iterations` loop steps. Array callbacks run on batches of 16 elements, and
+the exception workload throws once per 16 steps. Checksums include observable
+results; these are performance samples, not complete semantic coverage.
+
+List or select workloads without changing the script:
+
+```bash
+python3 benches/compare_engines.py --list-suites
+JS_RS_BIN="$PWD/target/release/examples/js-rs" python3 benches/compare_engines.py \
+  --suite typed_arrays,array_methods --suite map_set --compare-jit
+# Reproduce the original four-workload comparison:
+python3 benches/compare_engines.py --js-rs target/release/examples/js-rs \
+  --suite arithmetic,function_calls,objects_arrays,numeric_regions
+```
+
+The expanded default takes substantially longer and its end-to-end time is not
+comparable to the original four-workload total. Use identical selections when
+comparing binaries; reduce `--iterations` for exploratory runs. `--timeout`
+applies to the entire selected workload set per engine launch.
+Benchmark harness tests use `python3 -m unittest discover -s benches -p 'test_*.py'`.
 
 To compare ordinary `js-rs` with required-JIT execution on the same workloads:
 

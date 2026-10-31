@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import re
 import shutil
@@ -15,7 +16,25 @@ import time
 from pathlib import Path
 
 RESULT_PATTERN = re.compile(r"^BENCH_RESULT:([^:]+):([^:]+):(\d+)$", re.MULTILINE)
-SUITES = ("arithmetic", "function_calls", "objects_arrays", "numeric_regions")
+WORKLOADS = {
+    "arithmetic": ("arithmetic", "numeric arithmetic and remainder"),
+    "function_calls": ("functionCalls", "inline-eligible numeric calls"),
+    "objects_arrays": ("objectsAndArrays", "non-escaping scalar objects and arrays"),
+    "numeric_regions": ("numericRegions", "numeric loop inside a generator"),
+    "closures": ("closures", "calls with mutable captured state"),
+    "method_calls": ("methodCalls", "receiver-sensitive object method calls"),
+    "property_access": ("propertyAccess", "own, inherited and accessor properties"),
+    "array_methods": ("arrayMethods", "push/pop and map/reduce callbacks"),
+    "typed_arrays": ("typedArrays", "Uint32Array indexed loads and stores"),
+    "strings": ("strings", "concatenation, slicing and character access"),
+    "regexp": ("regexp", "RegExp execution and capture groups"),
+    "map_set": ("mapSet", "Map/Set insertion, lookup and deletion"),
+    "json": ("jsonRoundtrip", "JSON stringify/parse; ceil(iterations/10) roundtrips"),
+    "bigint": ("bigintArithmetic", "bounded BigInt arithmetic; ceil(iterations/10) steps"),
+    "exceptions": ("exceptions", "throw/optional catch/finally; one throw per 16 steps"),
+    "generators": ("generators", "generator resume and for-of iteration"),
+}
+SUITES = tuple(WORKLOADS)
 
 BENCHMARK_SOURCE = r'''
 "use strict";
@@ -67,6 +86,144 @@ function numericRegions(n) {
     return numericRegionGenerator(n).next().value;
 }
 
+function closures(n) {
+    let state = 1;
+    const update = function(value) {
+        state = (state + value) % 100003;
+        return state;
+    };
+    let checksum = 0;
+    for (let i = 0; i < n; i++) checksum += update(i % 97);
+    return checksum + state;
+}
+
+function methodCalls(n) {
+    const counter = {
+        value: 1,
+        update(delta) { this.value = (this.value + delta) % 100003; return this.value; }
+    };
+    let checksum = 0;
+    for (let i = 0; i < n; i++) checksum += counter.update(i % 97);
+    return checksum + counter.value;
+}
+
+function propertyAccess(n) {
+    const prototype = { bias: 7 };
+    const state = Object.create(prototype);
+    state.value = 1;
+    Object.defineProperty(state, "doubled", { get() { return this.value * 2; } });
+    let checksum = 0;
+    for (let i = 0; i < n; i++) {
+        state.value = i % 101;
+        checksum += state.value + state.bias + state.doubled;
+    }
+    return checksum;
+}
+
+function arrayMethods(n) {
+    const values = [];
+    let checksum = 0;
+    for (let i = 0; i < n; i++) {
+        values.push(i % 101);
+        if (values.length === 16) {
+            checksum += values.map(value => value * 3 + 1).reduce((sum, value) => sum + value, 0);
+            while (values.length) checksum += values.pop();
+        }
+    }
+    return checksum + values.reduce((sum, value) => sum + value, 0);
+}
+
+function typedArrays(n) {
+    const values = new Uint32Array(256);
+    let checksum = 0;
+    for (let i = 0; i < n; i++) {
+        const index = i & 255;
+        values[index] = (values[index] + i * 17 + 3) >>> 0;
+        checksum += values[index];
+    }
+    return checksum + values[0];
+}
+
+function strings(n) {
+    let checksum = 0;
+    for (let i = 0; i < n; i++) {
+        const text = "item-" + (i % 1000) + "-value";
+        const part = text.slice(5, -6);
+        checksum += part.length + part.charCodeAt(0) + text.indexOf("value");
+    }
+    return checksum;
+}
+
+function regexp(n) {
+    const pattern = /^item-(\d+)-([a-z]+)$/;
+    let checksum = 0;
+    for (let i = 0; i < n; i++) {
+        const match = pattern.exec("item-" + (i % 1000) + "-value");
+        checksum += Number(match[1]) + match[2].length + match[0].length;
+    }
+    return checksum;
+}
+
+function mapSet(n) {
+    const map = new Map();
+    const set = new Set();
+    let checksum = 0;
+    for (let i = 0; i < n; i++) {
+        const key = i % 256;
+        map.set(key, i % 100003);
+        set.add(key);
+        checksum += map.get(key) + (set.has(key) ? 1 : 0);
+        if ((i & 7) === 0) {
+            checksum += map.delete(key) ? 3 : 0;
+            checksum += set.delete(key) ? 5 : 0;
+        }
+    }
+    return checksum + map.size + set.size;
+}
+
+function jsonRoundtrip(n) {
+    let checksum = 0;
+    for (let i = 0; i < n; i += 10) {
+        const text = JSON.stringify({ id: i % 1000, label: "entry", values: [i % 97, true, null] });
+        const value = JSON.parse(text);
+        checksum += value.id + value.label.length + value.values[0] + text.length;
+    }
+    return checksum;
+}
+
+function bigintArithmetic(n) {
+    let state = 17n;
+    const modulus = 1000000007n;
+    for (let i = 0; i < n; i += 10) state = (state * 48271n + BigInt(i % 97)) % modulus;
+    return Number(state);
+}
+
+function exceptions(n) {
+    let checksum = 0;
+    let cleanups = 0;
+    for (let i = 0; i < n; i++) {
+        try {
+            if ((i & 15) === 0) throw i % 97;
+            checksum += i % 31;
+        } catch {
+            checksum += 7;
+        } finally {
+            cleanups++;
+        }
+    }
+    return checksum + cleanups;
+}
+
+function* sequence(n) {
+    for (let i = 0; i < n; i++) yield (i * 17) % 97;
+}
+
+function generators(n) {
+    let checksum = 0;
+    for (const value of sequence(n)) checksum += value;
+    return checksum;
+}
+
 function measure(name, workload) {
     const warmupStart = Date.now();
     workload(ITERATIONS);
@@ -81,11 +238,13 @@ function measure(name, workload) {
     console.log("BENCH_WARMUP:" + name + ":" + warmupElapsed);
 }
 
-measure("arithmetic", arithmetic);
-measure("function_calls", functionCalls);
-measure("objects_arrays", objectsAndArrays);
-measure("numeric_regions", numericRegions);
+__MEASURE_CALLS__
 '''
+
+
+def benchmark_source(iterations: int, suites: tuple[str, ...]) -> str:
+    calls = "\n".join(f'measure("{name}", {WORKLOADS[name][0]});' for name in suites)
+    return BENCHMARK_SOURCE.replace("__ITERATIONS__", str(iterations)).replace("__MEASURE_CALLS__", calls)
 
 
 def positive_int(value: str) -> int:
@@ -124,6 +283,7 @@ def run_engine(
     script_path: Path,
     timeout: float,
     extra_args: tuple[str, ...] = (),
+    suites: tuple[str, ...] = SUITES,
 ) -> tuple[dict[str, tuple[str, int]], float, dict[str, int]]:
     start = time.perf_counter()
     try:
@@ -141,20 +301,29 @@ def run_engine(
         raise RuntimeError(f"{executable} exited with {error.returncode}: {detail}") from error
     wall_ms = (time.perf_counter() - start) * 1000
 
+    result_rows = RESULT_PATTERN.findall(result.stdout)
     results = {
         name: (checksum, int(elapsed))
-        for name, checksum, elapsed in RESULT_PATTERN.findall(result.stdout)
+        for name, checksum, elapsed in result_rows
     }
-    if set(results) != set(SUITES):
+    if len(result_rows) != len(suites) or set(results) != set(suites):
         raise RuntimeError(
             f"{executable} did not emit all benchmark results; "
-            f"expected {', '.join(SUITES)}. stdout: {result.stdout!r}"
+            f"expected {', '.join(suites)}. stdout: {result.stdout!r}"
         )
+    for name, (checksum, _) in results.items():
+        try:
+            finite = math.isfinite(float(checksum))
+        except ValueError as error:
+            raise RuntimeError(f"{executable} emitted an invalid {name} checksum: {checksum}") from error
+        if not finite:
+            raise RuntimeError(f"{executable} emitted a non-finite {name} checksum: {checksum}")
+    warmup_rows = re.findall(r"^BENCH_WARMUP:([^:]+):(\d+)$", result.stdout, re.MULTILINE)
     warmups = {
         name: int(elapsed)
-        for name, elapsed in re.findall(r"^BENCH_WARMUP:([^:]+):(\d+)$", result.stdout, re.MULTILINE)
+        for name, elapsed in warmup_rows
     }
-    if set(warmups) != set(SUITES):
+    if len(warmup_rows) != len(suites) or set(warmups) != set(suites):
         raise RuntimeError(f"{executable} did not emit all first-invocation timings. stdout: {result.stdout!r}")
     return results, wall_ms, warmups
 
@@ -179,7 +348,17 @@ def main() -> int:
     parser.add_argument("--timeout", type=positive_int, default=120, help="timeout in seconds per process launch")
     parser.add_argument("--compare-jit", action="store_true", help="also measure required JIT against ordinary js-rs")
     parser.add_argument("--report-warmup", action="store_true", help="also report first in-process workload invocations")
+    parser.add_argument("--suite", action="append", help="select workloads (repeatable, comma-separated; default: all)")
+    parser.add_argument("--list-suites", action="store_true", help="list workloads and exit without launching engines")
     args = parser.parse_args()
+    if args.list_suites:
+        for name, (_, description) in WORKLOADS.items():
+            print(f"{name:<18} {description}")
+        return 0
+    suites = tuple(dict.fromkeys(name.strip() for group in args.suite for name in group.split(","))) if args.suite else SUITES
+    unknown = [name for name in suites if name not in WORKLOADS]
+    if unknown:
+        parser.error(f"unknown workload(s): {', '.join(unknown)}; use --list-suites")
 
     try:
         node = resolve_executable(args.node)
@@ -188,17 +367,18 @@ def main() -> int:
         print(f"js-rs:   {version_of(js_rs)} ({js_rs})")
         print(f"Runs: {args.runs}, process warmups: {args.warmup}, iterations: {args.iterations:,}")
 
-        source = BENCHMARK_SOURCE.replace("__ITERATIONS__", str(args.iterations))
+        print(f"Workloads: {', '.join(suites)}")
+        source = benchmark_source(args.iterations, suites)
         commands = [("node", node, ()), ("js-rs", js_rs, ())]
         if args.compare_jit:
             commands.append(("js-rs-jit", js_rs, ("--jit-required",)))
         wall_times: dict[str, list[float]] = {engine: [] for engine, _, _ in commands}
         kernel_times: dict[str, dict[str, list[float]]] = {
-            engine: {suite: [] for suite in SUITES} for engine in wall_times
+            engine: {suite: [] for suite in suites} for engine in wall_times
         }
         checksums: dict[str, dict[str, str]] = {engine: {} for engine in wall_times}
         warmup_times: dict[str, dict[str, list[float]]] = {
-            engine: {suite: [] for suite in SUITES} for engine in wall_times
+            engine: {suite: [] for suite in suites} for engine in wall_times
         }
 
         with tempfile.TemporaryDirectory(prefix="js-engine-bench-") as temp_dir:
@@ -207,14 +387,16 @@ def main() -> int:
 
             for _ in range(args.warmup):
                 for engine, executable, extra_args in commands:
-                    results, _, _ = run_engine(executable, script_path, args.timeout, extra_args)
+                    results, _, _ = run_engine(executable, script_path, args.timeout, extra_args, suites)
                     for suite, (checksum, _) in results.items():
-                        checksums[engine].setdefault(suite, checksum)
+                        expected = checksums[engine].setdefault(suite, checksum)
+                        if checksum != expected:
+                            raise RuntimeError(f"{engine} produced inconsistent {suite} warmup checksums")
 
             for run_index in range(args.runs):
                 order = commands if run_index % 2 == 0 else tuple(reversed(commands))
                 for engine, executable, extra_args in order:
-                    results, wall_ms, warmups = run_engine(executable, script_path, args.timeout, extra_args)
+                    results, wall_ms, warmups = run_engine(executable, script_path, args.timeout, extra_args, suites)
                     wall_times[engine].append(wall_ms)
                     for suite, warmup_ms in warmups.items():
                         warmup_times[engine][suite].append(float(warmup_ms))
@@ -224,7 +406,7 @@ def main() -> int:
                             raise RuntimeError(f"{engine} produced inconsistent {suite} checksums")
                         kernel_times[engine][suite].append(float(kernel_ms))
 
-        for suite in SUITES:
+        for suite in suites:
             for engine in wall_times:
                 if checksums["node"][suite] != checksums[engine][suite]:
                     raise RuntimeError(
@@ -234,7 +416,7 @@ def main() -> int:
 
         print("\nMedian in-script execution time (lower is faster; js-rs/Node > 1 means js-rs is slower)")
         print(f"{'workload':<18} {'Node.js':>12} {'js-rs':>12} {'js-rs/Node':>14}")
-        for suite in SUITES:
+        for suite in suites:
             node_ms = median(kernel_times["node"][suite])
             js_rs_ms = median(kernel_times["js-rs"][suite])
             print(f"{suite:<18} {node_ms:>9.1f} ms {js_rs_ms:>9.1f} ms {format_ratio(js_rs_ms, node_ms):>14}")
@@ -249,12 +431,12 @@ def main() -> int:
             print("\nMedian first workload invocation (included in process time, not the measured kernel)")
             engines = list(wall_times)
             print(f"{'workload':<18}" + "".join(f" {engine:>12}" for engine in engines))
-            for suite in SUITES:
+            for suite in suites:
                 print(f"{suite:<18}" + "".join(f" {median(warmup_times[engine][suite]):>9.1f} ms" for engine in engines))
         if args.compare_jit:
             print("\nRequired JIT vs ordinary js-rs (ratio > 1 means JIT is slower)")
             print(f"{'workload':<18} {'ordinary':>12} {'JIT':>12} {'JIT/ordinary':>14}")
-            for suite in SUITES:
+            for suite in suites:
                 ordinary_ms = median(kernel_times["js-rs"][suite])
                 jit_ms = median(kernel_times["js-rs-jit"][suite])
                 print(f"{suite:<18} {ordinary_ms:>9.1f} ms {jit_ms:>9.1f} ms {format_ratio(jit_ms, ordinary_ms):>14}")

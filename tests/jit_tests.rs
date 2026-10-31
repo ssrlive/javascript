@@ -8,6 +8,11 @@ fn assert_no_interpreter(runtime: &mut JsRuntime) {
     assert_eq!(stats.interpreter_opcodes, 0, "{stats:?}");
 }
 
+fn executed_bytecodes(runtime: &mut JsRuntime) -> u64 {
+    let stats = runtime.jit_stats();
+    stats.interpreter_opcodes + stats.baseline_opcodes
+}
+
 fn assert_baseline_matches(source: &str, expected: JsValue) {
     let interpreted = JsRuntime::with_gc_opcode_budget(1).unwrap().eval(source).unwrap();
     assert_eq!(interpreted, expected);
@@ -159,6 +164,588 @@ fn jit_baseline_gc_slices_preserve_heap_identity_and_opcode_budget() {
         }
     }
     assert!(slices > 40);
+    assert_no_interpreter(&mut runtime);
+}
+
+#[test]
+fn jit_baseline_short_templates_preserve_exact_slice_budgets() {
+    use javascript::JsRunStatus;
+
+    let source = "let total = 0; const state = { value: 0 }; \
+                  for (let i = 0; i < 20; i++) { state.value = i; total += state.value; } \
+                  total;";
+    for budget in [1, 3, 7, 8, 9, 16, 31, 32, 33] {
+        let mut runtime = JsRuntime::new();
+        runtime.set_jit_required(true);
+        runtime.start_eval(source).unwrap();
+        loop {
+            let before = runtime.jit_stats().baseline_opcodes;
+            let status = runtime.run_slice(budget).unwrap();
+            let executed = runtime.jit_stats().baseline_opcodes - before;
+            assert!(executed > 0 && executed <= budget as u64, "budget={budget}, executed={executed}");
+            runtime.collect_garbage();
+            match status {
+                JsRunStatus::Yielded => assert_eq!(executed, budget as u64),
+                JsRunStatus::Complete(value) => {
+                    assert_eq!(value, JsValue::Number(190.0));
+                    break;
+                }
+            }
+        }
+        assert_no_interpreter(&mut runtime);
+    }
+}
+
+#[test]
+fn jit_lazy_iteration_cells_preserve_shared_mutations_and_old_bindings() {
+    let source = r#"
+        const readers = [];
+        const writers = [];
+        function* build() {
+            for (let i = 0; i < 4; i++) {
+                readers.push(() => i);
+                writers.push(value => { i = value; });
+                yield i;
+            }
+        }
+        const generator = build();
+        generator.next();
+        writers[0](1);
+        generator.next();
+        writers[0](20);
+        generator.next();
+        generator.next();
+        readers.map(read => read()).join(',');
+    "#;
+    for budget in [1, DEFAULT_GC_OPCODE_BUDGET] {
+        let mut interpreter = JsRuntime::with_gc_opcode_budget(budget).unwrap();
+        assert_eq!(interpreter.eval(source).unwrap(), JsValue::String("20,2,3".into()));
+        let mut runtime = JsRuntime::with_gc_opcode_budget(budget).unwrap();
+        runtime.set_jit_required(true);
+        assert_eq!(runtime.eval(source).unwrap(), JsValue::String("20,2,3".into()));
+        assert_no_interpreter(&mut runtime);
+    }
+}
+
+#[test]
+fn jit_lazy_iteration_bindings_preserve_capture_continue_and_finally() {
+    let source = r#"
+        function build() {
+            const readers = [];
+            for (let i = 0; i < 5; i++) {
+                try {
+                    if (i === 1) continue;
+                    if (i === 4) break;
+                    readers.push(() => i);
+                } finally {
+                    if (i === 2) i = 3;
+                }
+            }
+            return readers.map(read => read()).join(',');
+        }
+        build();
+    "#;
+    assert_baseline_matches(source, JsValue::String("0,3".into()));
+}
+
+#[test]
+fn jit_lazy_iteration_bindings_preserve_destructuring_identity_and_tdz() {
+    let source = r#"
+        const readers = [];
+        for (const [value] of [[{ n: 1 }], [{ n: 2 }], [{ n: 3 }]]) {
+            readers.push(() => value);
+        }
+        const first = readers[0]();
+        first.n = 9;
+        const keys = [];
+        for (let key in { a: 1, b: 2 }) keys.push(() => key);
+        let tdz = false;
+        try {
+            for (let value of [value]) {}
+        } catch (error) {
+            tdz = error instanceof ReferenceError;
+        }
+        [readers[0]() === first, readers.map(read => read().n).join(','),
+         keys.map(read => read()).join(','), tdz].join(';');
+    "#;
+    assert_baseline_matches(source, JsValue::String("true;9,2,3;a,b;true".into()));
+}
+
+#[test]
+fn jit_lazy_iteration_bindings_survive_gc_between_yields() {
+    let source = r#"
+        const readers = [];
+        function* build() {
+            for (let i = 0; i < 4; i++) {
+                if (i > 0) readers.push(() => i);
+                yield { value: i };
+            }
+        }
+        const iterator = build();
+    "#;
+    for required in [false, true] {
+        let mut runtime = JsRuntime::with_gc_opcode_budget(1).unwrap();
+        runtime.set_jit_required(required);
+        runtime.eval(source).unwrap();
+        for index in 0..4 {
+            assert_eq!(runtime.eval("iterator.next().value.value;").unwrap(), JsValue::Number(index as f64));
+            runtime.collect_garbage();
+        }
+        assert_eq!(runtime.eval("iterator.next().done;").unwrap(), JsValue::Boolean(true));
+        runtime.collect_garbage();
+        assert_eq!(
+            runtime.eval("readers.map(read => read()).join(',');").unwrap(),
+            JsValue::String("1,2,3".into())
+        );
+        if required {
+            assert_no_interpreter(&mut runtime);
+        }
+    }
+}
+
+#[test]
+fn jit_native_numeric_loops_keep_locals_in_registers_across_backedges() {
+    let source = r#"
+        function* compute() {
+            let total = 0;
+            for (let i = 0; i < 2000; i++) total = total + i * 2 - i / 2;
+            yield total;
+        }
+        compute().next().value;
+    "#;
+    let mut interpreter = JsRuntime::new();
+    assert_eq!(interpreter.eval(source).unwrap(), JsValue::Number(2998500.0));
+    let mut runtime = JsRuntime::new();
+    runtime.set_jit_required(true);
+    assert_eq!(runtime.eval(source).unwrap(), JsValue::Number(2998500.0));
+    let stats = runtime.jit_stats();
+    assert!(stats.native_loop_opcodes > 20000, "{stats:?}");
+    assert!(
+        interpreter.jit_stats().native_loop_opcodes > 20000,
+        "ordinary mode must activate hot loops too"
+    );
+    assert_eq!(stats.baseline_opcodes, executed_bytecodes(&mut interpreter));
+    assert_eq!(stats.optimized_calls, 0);
+    assert_no_interpreter(&mut runtime);
+}
+
+#[test]
+fn jit_native_numeric_loops_exit_at_exact_slice_budgets() {
+    use javascript::JsRunStatus;
+    let source = r#"
+        function compute() {
+            Symbol();
+            let total = 0;
+            for (let i = 0; i < 1500; i++) total = total + i * 2 - i / 2;
+            return total;
+        }
+        compute();
+    "#;
+    let mut interpreter = JsRuntime::new();
+    let expected = interpreter.eval(source).unwrap();
+    for (required, budget) in [false, true]
+        .into_iter()
+        .flat_map(|required| [1, 7, 31, 32, 33, 64, 127, 1000].into_iter().map(move |budget| (required, budget)))
+    {
+        let mut runtime = JsRuntime::new();
+        runtime.set_jit_required(required);
+        runtime.start_eval(source).unwrap();
+        loop {
+            let before = executed_bytecodes(&mut runtime);
+            let status = runtime.run_slice(budget).unwrap();
+            let executed = executed_bytecodes(&mut runtime) - before;
+            assert!(executed > 0 && executed <= budget as u64, "budget={budget}, executed={executed}");
+            runtime.collect_garbage();
+            if let JsRunStatus::Complete(value) = status {
+                assert_eq!(value, expected, "budget={budget}");
+                break;
+            }
+            assert_eq!(executed, budget as u64, "budget={budget}");
+        }
+        let stats = runtime.jit_stats();
+        assert_eq!(
+            executed_bytecodes(&mut runtime),
+            executed_bytecodes(&mut interpreter),
+            "required={required}, budget={budget}"
+        );
+        if budget == 1000 {
+            assert!(stats.native_loop_opcodes > 0, "{stats:?}");
+        }
+        if required {
+            assert_no_interpreter(&mut runtime);
+        } else {
+            assert!(stats.interpreter_opcodes > 0);
+        }
+    }
+}
+
+#[test]
+fn jit_native_numeric_loops_read_live_operands_after_incremental_eval() {
+    for required in [false, true] {
+        let mut runtime = JsRuntime::new();
+        runtime.set_jit_required(required);
+        for multiplier in [2, 17, -3] {
+            let source = format!(
+                "function* compute() {{ let total = 0; \
+                 for (let i = 0; i < 80; i++) total = total + i * {multiplier}; \
+                 yield total; }} compute().next().value;"
+            );
+            let before = runtime.jit_stats().native_loop_opcodes;
+            assert_eq!(runtime.eval(source).unwrap(), JsValue::Number(3160.0 * multiplier as f64));
+            assert!(runtime.jit_stats().native_loop_opcodes > before);
+        }
+        if required {
+            assert_no_interpreter(&mut runtime);
+        }
+    }
+}
+
+#[test]
+fn jit_native_numeric_loops_preserve_captured_locals_and_observable_coercion() {
+    let source = r#"
+        let calls = 0;
+        function* captured() {
+            let total = 0;
+            const read = () => total;
+            for (let i = 0; i < 120; i++) total += i;
+            yield read();
+        }
+        function* coercion(value) {
+            let total = 0;
+            for (let i = 0; i < 120; i++) total += value * 2;
+            yield total;
+        }
+        const value = { valueOf() { calls++; return 3; } };
+        [captured().next().value, coercion(value).next().value, calls].join(',');
+    "#;
+    let mut interpreter = JsRuntime::new();
+    let expected = interpreter.eval(source).unwrap();
+    assert_eq!(expected, JsValue::String("7140,720,120".into()));
+    let mut runtime = JsRuntime::new();
+    runtime.set_jit_required(true);
+    assert_eq!(runtime.eval(source).unwrap(), expected);
+    assert!(runtime.jit_stats().native_loop_opcodes > 0);
+    assert_eq!(runtime.jit_stats().baseline_opcodes, executed_bytecodes(&mut interpreter));
+    assert_no_interpreter(&mut runtime);
+}
+
+#[test]
+fn jit_native_numeric_loops_preserve_ieee_values_and_cached_type_guards() {
+    let source = r#"
+        function* compute(seed, limit) {
+            let total = seed;
+            for (let i = 0; i < limit; i++) total = (total + i) * 2 - i / 2;
+            yield total;
+        }
+        compute(0, 100).next();
+        const results = [];
+        for (const limit of [0, 1, 31, 32, 33, 1023, 1024, 1025, 2049]) {
+            results.push(String(compute(0, limit).next().value));
+        }
+        for (const value of [-0, NaN, Infinity, -Infinity, '2', undefined, 2n, Symbol()]) {
+            try {
+                const result = compute(value, 40).next().value;
+                results.push(Object.is(result, -0) ? '-0' : String(result));
+            } catch (error) {
+                results.push(error.name);
+            }
+        }
+        results.join(';');
+    "#;
+    let mut interpreter = JsRuntime::new();
+    let expected = interpreter.eval(source).unwrap();
+    let mut runtime = JsRuntime::new();
+    runtime.set_jit_required(true);
+    assert_eq!(runtime.eval(source).unwrap(), expected);
+    let stats = runtime.jit_stats();
+    assert!(stats.native_loop_opcodes > 0);
+    assert_eq!(stats.baseline_opcodes, executed_bytecodes(&mut interpreter));
+    assert_no_interpreter(&mut runtime);
+}
+
+#[test]
+fn jit_native_numeric_loops_preserve_caught_throws_finally_and_coercion_counts() {
+    let source = r#"
+        const sentinel = {};
+        let calls = 0;
+        let finalized = 0;
+        function* compute(value) {
+            let total = 0;
+            try {
+                for (let i = 0; i < 80; i++) total += value * 2;
+                yield total;
+            } finally { finalized++; }
+        }
+        const warm = compute(2);
+        warm.next();
+        warm.next();
+        const throwing = { valueOf() { calls++; throw sentinel; } };
+        let caught = false;
+        try { compute(throwing).next(); } catch (error) { caught = error === sentinel; }
+        [caught, calls, finalized].join(',');
+    "#;
+    let mut interpreter = JsRuntime::new();
+    let expected = interpreter.eval(source).unwrap();
+    assert_eq!(expected, JsValue::String("true,1,2".into()));
+    let mut runtime = JsRuntime::new();
+    runtime.set_jit_required(true);
+    assert_eq!(runtime.eval(source).unwrap(), expected);
+    assert!(runtime.jit_stats().native_loop_opcodes > 0);
+    assert_eq!(runtime.jit_stats().baseline_opcodes, executed_bytecodes(&mut interpreter));
+    assert_no_interpreter(&mut runtime);
+}
+
+#[test]
+fn jit_native_numeric_infinite_loops_keep_yielding_to_gc_slices() {
+    use javascript::JsRunStatus;
+    let source = "function compute() { Symbol(); let i = 0; while (i >= 0) { i = i + 1; } } compute();";
+    let mut runtime = JsRuntime::new();
+    runtime.set_jit_required(true);
+    runtime.start_eval(source).unwrap();
+    for _ in 0..80 {
+        let before = runtime.jit_stats().baseline_opcodes;
+        assert!(matches!(runtime.run_slice(128).unwrap(), JsRunStatus::Yielded));
+        assert_eq!(runtime.jit_stats().baseline_opcodes - before, 128);
+        runtime.collect_garbage();
+    }
+    assert!(runtime.jit_stats().native_loop_opcodes > 0);
+    assert_no_interpreter(&mut runtime);
+}
+
+#[test]
+fn jit_numeric_regions_keep_intermediate_values_out_of_the_vm_stack() {
+    let source = r#"
+        function* compute() {
+            let total = 0;
+            for (let i = 0; i < 80; i++) {
+                total = total + i * 2 - i / 2;
+            }
+            yield total;
+        }
+        compute().next().value;
+    "#;
+    let mut interpreter = JsRuntime::new();
+    assert_eq!(interpreter.eval(source).unwrap(), JsValue::Number(4740.0));
+    let mut runtime = JsRuntime::new();
+    runtime.set_jit_required(true);
+    assert_eq!(runtime.eval(source).unwrap(), JsValue::Number(4740.0));
+    let stats = runtime.jit_stats();
+    assert!(stats.native_region_opcodes > 0, "{stats:?}");
+    assert_eq!(stats.baseline_opcodes, executed_bytecodes(&mut interpreter));
+    assert_eq!(
+        stats.optimized_calls, 0,
+        "exercise the baseline, not the existing function optimizer"
+    );
+    assert_no_interpreter(&mut runtime);
+}
+
+#[test]
+fn jit_numeric_regions_guard_types_without_replaying_coercions() {
+    for (value, expected) in [
+        ("2", "7"),
+        ("'2'", "25"),
+        ("2n", "throw:TypeError"),
+        ("undefined", "NaN"),
+        ("Symbol()", "throw:TypeError"),
+        ("{ valueOf() { trace += 'v'; return 2; } }", "7v"),
+        ("{ valueOf() { trace += 'v'; throw new Error('stop'); } }", "throw:Errorv"),
+    ] {
+        let source = format!(
+            r#"
+            let trace = '';
+            function* compute(value) {{
+                yield (1 + value) * 2 + 1;
+            }}
+            for (let i = 0; i < 40; i++) compute(2).next();
+            let result;
+            try {{ result = String(compute({value}).next().value); }}
+            catch (error) {{ result = 'throw:' + error.name; }}
+            result + trace;
+            "#
+        );
+        let mut interpreter = JsRuntime::new();
+        let reference = interpreter.eval(&source).unwrap();
+        assert_eq!(reference, JsValue::String(expected.to_string()), "{value}");
+        let mut runtime = JsRuntime::new();
+        runtime.set_jit_required(true);
+        assert_eq!(runtime.eval(&source).unwrap(), reference, "{value}");
+        assert!(runtime.jit_stats().native_region_opcodes > 0, "{value}");
+        assert_no_interpreter(&mut runtime);
+    }
+}
+
+#[test]
+fn jit_numeric_regions_preserve_ieee_values_comparisons_and_captured_locals() {
+    let source = r#"
+        function* compute(a, b) {
+            let result = (a * 2 + b) / 2;
+            let compare = a * 2 + b < 0;
+            yield [Object.is(result, -0), Number.isNaN(result), result === Infinity, compare].join(',');
+        }
+        for (let i = 0; i < 40; i++) compute(i, 1).next();
+        function* captured() {
+            let value = 2;
+            const read = () => value;
+            value = (value + 1) * 2;
+            yield read();
+        }
+        [
+            compute(-0, -0).next().value,
+            compute(NaN, 1).next().value,
+            compute(Infinity, 1).next().value,
+            compute(-3, 1).next().value,
+            captured().next().value
+        ].join(';');
+    "#;
+    let mut interpreter = JsRuntime::new();
+    let expected = interpreter.eval(source).unwrap();
+    assert_eq!(
+        expected,
+        JsValue::String("true,false,false,false;false,true,false,false;false,false,true,false;false,false,false,true;6".into())
+    );
+    let mut runtime = JsRuntime::new();
+    runtime.set_jit_required(true);
+    assert_eq!(runtime.eval(source).unwrap(), expected);
+    assert!(runtime.jit_stats().native_region_opcodes > 0);
+    assert_no_interpreter(&mut runtime);
+}
+
+#[test]
+fn jit_numeric_regions_preserve_all_numeric_comparison_results() {
+    for operator in ["<", ">", "<=", ">=", "==", "===", "!="] {
+        let source = format!(
+            r#"
+            function* compare(a, b) {{ yield a * 1 {operator} b; }}
+            for (let i = 0; i < 40; i++) compare(i, 0).next();
+            [
+                compare(NaN, 0).next().value,
+                compare(0, NaN).next().value,
+                compare(-0, 0).next().value,
+                compare(Infinity, Infinity).next().value,
+                compare(-3, 2).next().value,
+                compare(3, 2).next().value
+            ].join(',');
+            "#
+        );
+        let reference = JsRuntime::new().eval(&source).unwrap();
+        let mut runtime = JsRuntime::new();
+        runtime.set_jit_required(true);
+        assert_eq!(runtime.eval(&source).unwrap(), reference, "{operator}");
+        assert!(runtime.jit_stats().native_region_opcodes > 0, "{operator}");
+        assert_no_interpreter(&mut runtime);
+    }
+}
+
+#[test]
+fn jit_numeric_region_templates_read_live_operands_after_incremental_eval() {
+    let mut interpreter = JsRuntime::new();
+    let mut runtime = JsRuntime::new();
+    runtime.set_jit_required(true);
+    for constant in [2, 17, 99] {
+        let source = format!(
+            "function* compute(a) {{ let b = 0; \
+             for (let i = 0; i < 80; i++) b = b + a * {constant} - i / 2; yield b; }} \
+             [compute(2).next().value, compute('2').next().value].join(',');"
+        );
+        assert_eq!(runtime.eval(&source).unwrap(), interpreter.eval(&source).unwrap());
+    }
+    assert!(runtime.jit_stats().native_region_opcodes > 0);
+    assert_no_interpreter(&mut runtime);
+}
+
+#[test]
+fn jit_numeric_region_counters_include_eval_realms_and_completed_agents() {
+    let script = "function* numeric() { let n = 0; \
+                  for (let i = 0; i < 80; i++) n = n + i * 2 - i / 2; yield n; } \
+                  numeric().next().value;";
+    for source in [format!("eval({script:?});"), format!("__createRealm__().global.eval({script:?});")] {
+        let mut runtime = JsRuntime::new();
+        runtime.set_jit_required(true);
+        assert_eq!(runtime.eval(&source).unwrap(), JsValue::Number(4740.0));
+        assert!(runtime.jit_stats().native_region_opcodes > 0);
+        assert!(runtime.jit_stats().native_loop_opcodes > 0);
+        assert_no_interpreter(&mut runtime);
+    }
+    let mut runtime = JsRuntime::new();
+    runtime.set_jit_required(true);
+    let worker = format!("{script} __agent_report('done');");
+    runtime.eval(format!("__agent_start({worker:?});")).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while runtime.jit_stats().native_loop_opcodes == 0 {
+        assert!(std::time::Instant::now() < deadline, "agent did not finish numeric execution");
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert_no_interpreter(&mut runtime);
+    assert_eq!(JsRuntime::new().jit_stats().native_region_opcodes, 0);
+    assert_eq!(JsRuntime::new().jit_stats().native_loop_opcodes, 0);
+}
+
+#[test]
+fn jit_numeric_regions_respect_slice_budgets_and_gc_boundaries() {
+    use javascript::JsRunStatus;
+    let source = r#"
+        function compute() {
+            Symbol();
+            let value = 1;
+            for (let i = 0; i < 80; i++) value = (value + i) * 2 - i;
+            return value;
+        }
+        compute();
+    "#;
+    let expected = JsRuntime::new().eval(source).unwrap();
+    for budget in [1, 3, 4, 7, 8, 9, 16, 33] {
+        let mut runtime = JsRuntime::new();
+        runtime.set_jit_required(true);
+        runtime.start_eval(source).unwrap();
+        loop {
+            let before = runtime.jit_stats().baseline_opcodes;
+            let status = runtime.run_slice(budget).unwrap();
+            let executed = runtime.jit_stats().baseline_opcodes - before;
+            assert!(executed > 0 && executed <= budget as u64, "budget={budget}, executed={executed}");
+            runtime.collect_garbage();
+            if let JsRunStatus::Complete(value) = status {
+                assert_eq!(value, expected, "budget={budget}");
+                break;
+            }
+            assert_eq!(executed, budget as u64);
+        }
+        assert_eq!(runtime.jit_stats().optimized_calls, 0);
+        if budget == 1 {
+            assert_eq!(runtime.jit_stats().native_region_opcodes, 0);
+        } else if budget == 33 {
+            assert!(runtime.jit_stats().native_region_opcodes > 0);
+        }
+        assert_no_interpreter(&mut runtime);
+    }
+}
+
+#[test]
+fn jit_baseline_batched_counters_include_reentrant_calls_and_caught_throws() {
+    let source = r#"
+        let total = 0;
+        const sentinel = {};
+        const output = [1, 2, 3].map(value => {
+            total += value;
+            return { value };
+        });
+        try { throw sentinel; } catch (error) {
+            if (error !== sentinel) throw new Error("identity lost");
+        }
+        total + output[2].value;
+    "#;
+    let mut interpreter = JsRuntime::new();
+    assert_eq!(interpreter.eval(source).unwrap(), JsValue::Number(9.0));
+    let interpreted = interpreter.jit_stats();
+    let mut runtime = JsRuntime::new();
+    runtime.set_jit_required(true);
+    assert_eq!(runtime.eval(source).unwrap(), JsValue::Number(9.0));
+    let compiled = runtime.jit_stats();
+    assert_eq!(interpreted.optimized_calls, 0);
+    assert_eq!(compiled.optimized_calls, 0);
+    assert_eq!(compiled.baseline_opcodes, interpreted.interpreter_opcodes);
+    assert!(interpreter.eval("throw new Error('uncaught');").is_err());
+    assert!(runtime.eval("throw new Error('uncaught');").is_err());
+    assert_eq!(runtime.jit_stats().baseline_opcodes, executed_bytecodes(&mut interpreter));
     assert_no_interpreter(&mut runtime);
 }
 
@@ -541,6 +1128,20 @@ fn jit_baseline_modules_preserve_top_level_await_and_live_bindings() {
             assert_no_interpreter(&mut runtime);
         }
     }
+}
+
+#[test]
+fn jit_baseline_shared_templates_read_current_operands_and_branch_targets() {
+    let mut source = String::from("let total = 0; const values = {};");
+    for index in 0..80 {
+        source.push_str(&format!(
+            "values.key{index} = {index}; \
+             if (values.key{index} === {index}) {{ total += values.key{index}; }} \
+             else {{ throw 'wrong operand {index}'; }}"
+        ));
+    }
+    source.push_str("total;");
+    assert_baseline_matches(&source, JsValue::Number(3160.0));
 }
 
 #[test]

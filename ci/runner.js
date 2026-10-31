@@ -135,32 +135,36 @@ if (!fs.existsSync(TEST262_ROOT_DIR)) {
   spawnSync('git', ['clone', '--depth', '1', 'https://github.com/tc39/test262.git', TEST262_ROOT_DIR], { stdio: 'inherit' });
 }
 
-// Build engine
-console.log('Building engine interpreter...');
 const USE_RELEASE = process.env.TEST262_RELEASE !== '0';
-const buildArgs = ['build', '--example', 'js-rs', '--all-features'];
-if (USE_RELEASE) buildArgs.push('--release');
-const buildRes = spawnSync('cargo', buildArgs, { stdio: 'inherit' });
-if (!buildRes || buildRes.status !== 0) {
-  console.error('ERROR: Engine build failed. Aborting tests.');
-  process.exit(buildRes && buildRes.status ? buildRes.status : 1);
+const ENGINE_BINARY = process.env.TEST262_BIN;
+if (!ENGINE_BINARY) {
+  console.log('Building engine interpreter...');
+  const buildArgs = ['build', '--example', 'js-rs', '--all-features'];
+  if (USE_RELEASE) buildArgs.push('--release');
+  const buildRes = spawnSync('cargo', buildArgs, { stdio: 'inherit' });
+  if (!buildRes || buildRes.status !== 0) {
+    console.error('ERROR: Engine build failed. Aborting tests.');
+    process.exit(buildRes && buildRes.status ? buildRes.status : 1);
+  }
 }
 
 // Locate binary
 let BIN = '';
-const binCandidates = USE_RELEASE
-  ? ['target/release/examples/js-rs', 'target/release/examples/js-rs.exe']
-  : ['target/debug/examples/js-rs', 'target/debug/examples/js-rs.exe'];
+const binCandidates = ENGINE_BINARY
+  ? [ENGINE_BINARY]
+  : (USE_RELEASE
+    ? ['target/release/examples/js-rs', 'target/release/examples/js-rs.exe']
+    : ['target/debug/examples/js-rs', 'target/debug/examples/js-rs.exe']);
 
 for (const candidate of binCandidates) {
-  if (fs.existsSync(candidate)) {
+  if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
     BIN = path.resolve(candidate);
     break;
   }
 }
 
 if (!BIN) {
-  console.error('ERROR: JS engine binary not found after build. Checked paths:');
+  console.error('ERROR: JS engine binary not found. Checked paths:');
   for (const candidate of binCandidates) {
     console.error(`  - ${path.resolve(candidate)}`);
   }

@@ -35,6 +35,10 @@ pub enum JsRunStatus {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct JitStats {
     pub baseline_opcodes: u64,
+    /// Subset of baseline opcodes lowered into register-resident numeric regions.
+    pub native_region_opcodes: u64,
+    /// Subset of baseline opcodes executed by register-resident numeric loops.
+    pub native_loop_opcodes: u64,
     pub interpreter_opcodes: u64,
     pub optimized_calls: u64,
 }
@@ -165,6 +169,8 @@ impl JsRuntime {
         let mut stats = self.mutate_root(|_, vm| vm.jit_stats());
         let agent_stats = crate::js_agent::jit_stats(self.agent_context_id);
         stats.baseline_opcodes += agent_stats.baseline_opcodes;
+        stats.native_region_opcodes += agent_stats.native_region_opcodes;
+        stats.native_loop_opcodes += agent_stats.native_loop_opcodes;
         stats.interpreter_opcodes += agent_stats.interpreter_opcodes;
         stats.optimized_calls += agent_stats.optimized_calls;
         stats

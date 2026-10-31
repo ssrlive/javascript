@@ -158,8 +158,43 @@ passthrough, with restricted exception and closure paths. Baseline blocks keep
 all live JavaScript values in traced VM storage; they return at opcode-budget
 boundaries so incremental GC can run between slices. Pending throws, catch
 stack cleanup, and reentrant callbacks preserve VM behavior.
+Baseline native templates are reused for matching opcode sequences and operand
+widths across bytecode locations; actual operands remain in the current chunk.
+Templates contain at most eight opcodes to limit cold compilation work and
+increase shape reuse; longer paths continue in another native template. The
+final helper returns directly to the VM without redundant continuation checks.
+Opcode counters are accumulated per native invocation, including errors and
+reentrant calls, instead of updating the VM counter after every opcode.
+This reduces duplicate compilation without specializing away observable effects.
+Per-iteration lexical bindings detach the previous iteration's captured cell
+and preserve its latest value in the local slot. A new cell is materialized
+only when captured or explicitly boxed, avoiding GC allocation on each
+iteration of an uncaptured numeric loop in both ordinary and required-JIT modes.
+Cold paths retain the compact helper template; after 32 visits to a bytecode
+location, eligible straight-line numeric expressions are tiered up to Cranelift
+arithmetic and comparisons. A region checks its Number
+inputs and remaining opcode budget once, keeps intermediate values in native
+SSA registers, and commits only live stack outputs and a final local assignment.
+Captured numeric locals are read/written at region boundaries; no JavaScript
+callbacks or GC safepoints occur inside a region. Type, TDZ, alias or budget
+guard failures execute the original compiled semantic-helper path without
+replaying side effects. These regions do not yet keep values in registers
+across arbitrary templates, calls or allocation.
+Hot, balanced numeric loops with one conditional exit and one backedge have a
+separate native tier: Number locals stay in SSA registers across iterations,
+with no helper calls or VM stack traffic in the loop. Captured scalar locals
+are synchronized at entry/exit; captured per-iteration bindings, observable
+operations and unsupported control flow retain the compiled baseline path.
+Native loop invocations consume at most the remaining opcode budget and 1024
+iterations, then commit locals and resume at the precise bytecode boundary.
+`native_loop_opcodes` counts this additional subset of baseline execution.
+Ordinary mode also activates this tier after 32 backward jumps, including
+inside generators whose complete functions are not eligible for optimization.
+Cold and unsupported ordinary paths remain interpreted; required-JIT guard
+failures stay in the compiled baseline.
 `JsRuntime::jit_stats()` exposes baseline opcode, interpreter opcode, and
-optimized-call counters for verifying execution paths. With required JIT enabled
+optimized-call counters, plus `native_region_opcodes` (a subset of baseline
+opcodes executed by numeric regions), for verifying execution paths. With required JIT enabled
 from runtime creation, the interpreter opcode count must remain zero, including
 eval, retained child realms, and completed Test262 agents. Agent threads inherit
 the spawning VM's required-JIT setting; their counters are included after they
@@ -401,6 +436,27 @@ The standalone comparison script runs the same JavaScript workloads under Node.j
 ```
 
 Use `--runs`, `--warmup`, and `--iterations` to adjust the workload. It reports in-script and end-to-end timings and verifies matching checksums. The in-script timer uses JavaScript `Date.now()` (millisecond resolution), so increase `--iterations` when Node.js measurements are only a few milliseconds. Results are workload-specific and do not represent general performance.
+
+To compare ordinary `js-rs` with required-JIT execution on the same workloads:
+
+```bash
+cargo build --release --example js-rs --all-features
+python benches/compare_engines.py --js-rs target/release/examples/js-rs --compare-jit
+```
+
+Ordinary mode already optimizes eligible hot numeric functions. Required-JIT
+mode additionally compiles cold script and function paths that ordinary mode
+interprets. The helper-backed baseline adds compilation and per-opcode helper
+costs, so Test262 throughput can be lower even when all tests pass. Conformance
+coverage is not a speedup claim. Compare identical release builds, test
+selections, job counts, and exclusions; use the in-script and end-to-end results
+to distinguish hot execution from startup/compilation costs.
+For Test262 comparisons of saved engine binaries, set `TEST262_BIN` to the
+executable path to skip rebuilding, and use distinct `TEST262_RESULTS_FILE`
+paths. The runner prints the resolved engine path; an invalid override fails
+instead of selecting a different binary.
+The `numeric_regions` benchmark uses a generator to exercise these regions
+independently of the pre-existing whole-function numeric optimizer.
 
 ## Contributing
 

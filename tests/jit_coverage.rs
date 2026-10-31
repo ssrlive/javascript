@@ -8,6 +8,40 @@ const BASELINE_SOURCE: &str = include_str!("../src/core/vm/runner.rs");
 const UNCOVERED_BASELINE_OPCODES: &[&str] = &["DisposeResources", "DisposeResourcesAsync"];
 const BASELINE_SEMANTIC_TESTS: &[(&str, &[&str])] = &[
     (
+        "jit_native_numeric_loops_keep_locals_in_registers_across_backedges",
+        &[
+            "GetLocal",
+            "SetLocal",
+            "Add",
+            "Sub",
+            "Mul",
+            "Div",
+            "Jump",
+            "JumpIfFalse",
+            "ReboxLocal",
+        ],
+    ),
+    (
+        "jit_lazy_iteration_cells_preserve_shared_mutations_and_old_bindings",
+        &["ReboxLocal", "GetLocal", "SetLocal", "MakeClosure"],
+    ),
+    (
+        "jit_numeric_regions_keep_intermediate_values_out_of_the_vm_stack",
+        &["Constant", "GetLocal", "SetLocal", "Add", "Sub", "Mul", "Div"],
+    ),
+    (
+        "jit_numeric_regions_preserve_all_numeric_comparison_results",
+        &[
+            "LessThan",
+            "GreaterThan",
+            "LessEqual",
+            "GreaterEqual",
+            "Equal",
+            "StrictEqual",
+            "NotEqual",
+        ],
+    ),
+    (
         "jit_baseline_classes_preserve_super_receivers_and_descriptors",
         &[
             "ValidateClassHeritage",

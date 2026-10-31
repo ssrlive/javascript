@@ -312,6 +312,8 @@ pub fn start_agent(script: String, jit_required: bool) {
                     let context = current_context();
                     let mut total = context.jit_stats.lock().unwrap();
                     total.baseline_opcodes += stats.baseline_opcodes;
+                    total.native_region_opcodes += stats.native_region_opcodes;
+                    total.native_loop_opcodes += stats.native_loop_opcodes;
                     total.interpreter_opcodes += stats.interpreter_opcodes;
                     total.optimized_calls += stats.optimized_calls;
                 }

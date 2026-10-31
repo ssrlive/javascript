@@ -28,7 +28,7 @@ struct NativeJitCallOptions<'a, 'gc> {
 }
 
 #[cfg(feature = "jit")]
-pub(crate) type BaselineBlock = unsafe extern "C" fn(*mut std::ffi::c_void);
+pub(crate) type BaselineBlock = unsafe extern "C" fn(*mut std::ffi::c_void, usize);
 #[cfg(feature = "jit")]
 pub(crate) type BaselineHelper = unsafe extern "C" fn(*mut std::ffi::c_void, usize, usize) -> u8;
 
@@ -44,7 +44,7 @@ struct BaselineState<'a, 'gc> {
 
 #[cfg(feature = "jit")]
 impl<'gc> BaselineState<'_, 'gc> {
-    fn step(
+    fn step<const CONTINUE: bool>(
         &mut self,
         offset: usize,
         next: usize,
@@ -55,7 +55,6 @@ impl<'gc> BaselineState<'_, 'gc> {
         let depth = self.vm.frames.len();
         let action = execute(self.vm, self.ctx, self.min_depth);
         self.executed += 1;
-        self.vm.jit_stats.baseline_opcodes += 1;
         match action {
             Err(error) => {
                 self.outcome = Some(Err(error));
@@ -73,7 +72,8 @@ impl<'gc> BaselineState<'_, 'gc> {
             }
         }
         u8::from(
-            self.vm.ip == next
+            CONTINUE
+                && self.vm.ip == next
                 && self.vm.frames.len() == depth
                 && self.vm.pending_throw.is_none()
                 && !self.vm.stop_requested
@@ -82,13 +82,223 @@ impl<'gc> BaselineState<'_, 'gc> {
     }
 }
 
-// Each address names one semantic operation, not an interpreter dispatch loop.
 #[cfg(feature = "jit")]
+pub(crate) unsafe extern "C" fn baseline_numeric_prepare(
+    data: *mut std::ffi::c_void,
+    base: usize,
+    region: *const crate::runtime::jit::baseline::numeric::Region,
+    scratch: *mut f64,
+) -> u8 {
+    use crate::runtime::jit::baseline::numeric::Input;
+    // The JIT owns the stable region allocation and supplies an aligned native
+    // scratch slot. Only Number values cross this boundary, never GC references.
+    let state = unsafe { &mut *data.cast::<BaselineState<'_, '_>>() };
+    let region = unsafe { &*region };
+    if state.budget.is_some_and(|budget| budget - state.executed < region.count)
+        || state.vm.pending_throw.is_some()
+        || state.vm.throw_caught_stack_depth.is_some()
+        || state.vm.stop_requested
+    {
+        return 0;
+    }
+    let (bp, cells) = state
+        .vm
+        .frames
+        .last()
+        .map_or((0, &state.vm.top_level_cells), |frame| (frame.bp, &frame.local_cells));
+    // Consumed operands must not alias locals or remove captured-local cells.
+    let Some(keep) = state.vm.stack.len().checked_sub(region.consumed) else {
+        return 0;
+    };
+    if cells.keys().any(|index| bp + index >= keep) {
+        return 0;
+    }
+    if let Some((operand, _)) = region.store
+        && bp + state.vm.chunk.code[base + operand] as usize >= keep
+    {
+        return 0;
+    }
+    for (index, input) in region.inputs.iter().enumerate() {
+        let number = |value: &Value<'_>| match value {
+            Value::Number(number) => Some(*number),
+            _ => None,
+        };
+        let number = match *input {
+            Input::Stack(depth) => number(&state.vm.stack[state.vm.stack.len() - 1 - depth]),
+            Input::Constant(operand) => {
+                let operand = base + operand;
+                let index = u16::from_le_bytes([state.vm.chunk.code[operand], state.vm.chunk.code[operand + 1]]) as usize;
+                let Some(value) = state.vm.chunk.constants.get(index) else {
+                    return 0;
+                };
+                number(value)
+            }
+            Input::Local(operand) => {
+                let index = bp + state.vm.chunk.code[base + operand] as usize;
+                if index >= keep {
+                    return 0;
+                }
+                if let Some(cell) = cells.get(&(index - bp)) {
+                    number(&cell.borrow())
+                } else {
+                    number(&state.vm.stack[index])
+                }
+            }
+        };
+        let Some(number) = number else {
+            return 0;
+        };
+        unsafe { scratch.add(index).write(number) };
+    }
+    1
+}
+
+#[cfg(feature = "jit")]
+pub(crate) unsafe extern "C" fn baseline_numeric_commit(
+    data: *mut std::ffi::c_void,
+    base: usize,
+    region: *const crate::runtime::jit::baseline::numeric::Region,
+    scratch: *const f64,
+) -> u8 {
+    let state = unsafe { &mut *data.cast::<BaselineState<'_, '_>>() };
+    let region = unsafe { &*region };
+    let value = |index: usize, register: usize| {
+        let number = unsafe { *scratch.add(region.inputs.len() + index) };
+        if region.is_boolean(register) {
+            Value::Boolean(number != 0.0)
+        } else {
+            Value::Number(number)
+        }
+    };
+    state.vm.stack.truncate(state.vm.stack.len() - region.consumed);
+    if let Some((operand, register)) = region.store {
+        let bp = state.vm.frames.last().map_or(0, |frame| frame.bp);
+        let index = state.vm.chunk.code[base + operand] as usize;
+        let cells = state.vm.frames.last().map_or(&state.vm.top_level_cells, |frame| &frame.local_cells);
+        if let Some(cell) = cells.get(&index) {
+            *cell.borrow_mut(state.ctx) = value(region.outputs.len(), register);
+        } else {
+            state.vm.stack[bp + index] = value(region.outputs.len(), register);
+        }
+    }
+    for (index, &register) in region.outputs.iter().enumerate() {
+        state.vm.stack.push(value(index, register));
+    }
+    state.vm.current_opcode_ip = base + region.last;
+    state.vm.ip = base + region.next;
+    state.executed += region.count;
+    state.vm.jit_stats.native_region_opcodes += region.count as u64;
+    u8::from(!state.budget.is_some_and(|budget| state.executed >= budget))
+}
+
+#[cfg(feature = "jit")]
+pub(crate) unsafe extern "C" fn baseline_loop_prepare(
+    data: *mut std::ffi::c_void,
+    base: usize,
+    plan: *const crate::runtime::jit::baseline::loops::NumericLoop,
+    scratch: *mut f64,
+) -> u8 {
+    let state = unsafe { &mut *data.cast::<BaselineState<'_, '_>>() };
+    let plan = unsafe { &*plan };
+    let quota = state
+        .budget
+        .map_or(1024, |budget| (budget - state.executed) / plan.count())
+        .min(1024);
+    if quota == 0 || state.vm.stop_requested || state.vm.pending_throw.is_some() || state.vm.throw_caught_stack_depth.is_some() {
+        return 0;
+    }
+    let (bp, cells) = state
+        .vm
+        .frames
+        .last()
+        .map_or((0, &state.vm.top_level_cells), |frame| (frame.bp, &frame.local_cells));
+    if cells.keys().any(|slot| bp + slot >= state.vm.stack.len()) {
+        return 0;
+    }
+    for (index, slot) in plan.locals.iter().enumerate() {
+        if cells.contains_key(slot) && plan.reboxed.contains(slot) {
+            log::trace!("JIT numeric loop guard rejected captured per-iteration binding {slot}");
+            return 0;
+        }
+        if bp + slot >= state.vm.stack.len() {
+            return 0;
+        }
+        let number = if let Some(cell) = cells.get(slot) {
+            let Value::Number(number) = *cell.borrow() else { return 0 };
+            number
+        } else {
+            let Value::Number(number) = state.vm.stack[bp + slot] else {
+                return 0;
+            };
+            number
+        };
+        unsafe { scratch.add(index).write(number) };
+    }
+    for (index, operand) in plan.constants.iter().enumerate() {
+        let offset = base + operand;
+        let index_in_pool = u16::from_le_bytes([state.vm.chunk.code[offset], state.vm.chunk.code[offset + 1]]) as usize;
+        let Some(Value::Number(number)) = state.vm.chunk.constants.get(index_in_pool) else {
+            return 0;
+        };
+        unsafe { scratch.add(plan.locals.len() + index).write(*number) };
+    }
+    unsafe { scratch.add(plan.metadata()).cast::<usize>().write(quota) };
+    1
+}
+
+#[cfg(feature = "jit")]
+pub(crate) unsafe extern "C" fn baseline_loop_commit(
+    data: *mut std::ffi::c_void,
+    base: usize,
+    plan: *const crate::runtime::jit::baseline::loops::NumericLoop,
+    scratch: *const f64,
+) -> u8 {
+    let state = unsafe { &mut *data.cast::<BaselineState<'_, '_>>() };
+    let plan = unsafe { &*plan };
+    let bp = state.vm.frames.last().map_or(0, |frame| frame.bp);
+    let cells = state.vm.frames.last().map_or(&state.vm.top_level_cells, |frame| &frame.local_cells);
+    for (index, slot) in plan.locals.iter().enumerate() {
+        if plan.written.contains(slot) {
+            let value = Value::Number(unsafe { *scratch.add(index) });
+            if let Some(cell) = cells.get(slot) {
+                *cell.borrow_mut(state.ctx) = value;
+            } else {
+                state.vm.stack[bp + slot] = value;
+            }
+        }
+    }
+    let executed = unsafe { *scratch.add(plan.metadata()).cast::<usize>() };
+    let complete = unsafe { *scratch.add(plan.metadata() + 1).cast::<usize>() } != 0;
+    state.executed += executed;
+    state.vm.jit_stats.native_loop_opcodes += executed as u64;
+    state.vm.current_opcode_ip = base + if complete { plan.condition } else { plan.backedge };
+    state.vm.ip = base + if complete { plan.exit } else { 0 };
+    0
+}
+
+#[cfg(feature = "jit")]
+// Each address names one semantic operation, not an interpreter dispatch loop.
 macro_rules! baseline_helpers {
     (|$vm:ident, $ctx:ident, $depth:ident| $($opcode:ident => $body:expr),* $(,)?) => {
         pub(crate) fn baseline_helper(opcode: Opcode) -> Option<BaselineHelper> {
             match opcode {
                 $(Opcode::$opcode => Some($opcode),)*
+                Opcode::DisposeResources | Opcode::DisposeResourcesAsync => None,
+            }
+        }
+
+        pub(crate) fn baseline_terminal_helper(opcode: Opcode) -> Option<BaselineHelper> {
+            match opcode {
+                $(Opcode::$opcode => {
+                    unsafe extern "C" fn terminal(data: *mut std::ffi::c_void, offset: usize, next: usize) -> u8 {
+                        let state = unsafe { &mut *data.cast::<BaselineState<'_, '_>>() };
+                        state.step::<false>(offset, next, |$vm, $ctx, $depth| {
+                            let _ = (&$ctx, &$depth);
+                            $body
+                        })
+                    }
+                    Some(terminal)
+                },)*
                 Opcode::DisposeResources | Opcode::DisposeResourcesAsync => None,
             }
         }
@@ -99,7 +309,7 @@ macro_rules! baseline_helpers {
                 // Only execute_baseline_block creates this pointer, and the native
                 // block cannot retain it beyond the synchronous call.
                 let state = unsafe { &mut *data.cast::<BaselineState<'_, '_>>() };
-                state.step(offset, next, |$vm, $ctx, $depth| {
+                state.step::<true>(offset, next, |$vm, $ctx, $depth| {
                     let _ = (&$ctx, &$depth);
                     $body
                 })
@@ -354,6 +564,76 @@ impl<'gc> VM<'gc> {
             .expect("baseline engine initialized")
             .block(&self.chunk, self.ip)
             .map_err(|error| crate::raise_eval_error!(format!("JIT-required mode: {error}")))?;
+        self.execute_compiled_baseline(ctx, min_depth, budget, function)
+    }
+
+    #[cfg(feature = "jit")]
+    fn execute_hot_numeric_loop(&mut self, ctx: &GcContext<'gc>, min_depth: usize, budget: Option<usize>) -> Result<usize, JSError> {
+        use crate::runtime::jit::baseline::{BaselineJit, NATIVE_REGION_THRESHOLD, loops::NumericLoop};
+        let visits = self.jit_loop_visits.entry(self.ip).or_default();
+        if *visits == usize::MAX {
+            return Ok(0);
+        }
+        *visits = visits.saturating_add(1);
+        if *visits < NATIVE_REGION_THRESHOLD {
+            return Ok(0);
+        }
+        if self.baseline_jit.is_none() {
+            if NumericLoop::build(&self.chunk, self.ip).is_none() {
+                *visits = usize::MAX;
+                return Ok(0);
+            }
+            match BaselineJit::new() {
+                Ok(jit) => self.baseline_jit = Some(jit),
+                Err(error) => {
+                    log::warn!("JIT numeric loop initialization failed; interpreting: {error}");
+                    *visits = usize::MAX;
+                    return Ok(0);
+                }
+            }
+        }
+        let function = match self
+            .baseline_jit
+            .as_mut()
+            .expect("baseline engine initialized")
+            .ordinary_loop(&self.chunk, self.ip)
+        {
+            Ok(Some(function)) => function,
+            Ok(None) => {
+                *visits = usize::MAX;
+                return Ok(0);
+            }
+            Err(error) => {
+                log::warn!("JIT numeric loop compilation failed; interpreting: {error}");
+                *visits = usize::MAX;
+                return Ok(0);
+            }
+        };
+        let start = self.ip;
+        let mut total = 0;
+        loop {
+            let remaining = budget.map(|budget| budget - total);
+            let (executed, outcome) = self.execute_compiled_baseline(ctx, min_depth, remaining, function)?;
+            debug_assert!(outcome.is_none(), "numeric loops cannot return or throw");
+            total += executed;
+            if executed == 0 || self.ip != start || budget.is_some_and(|budget| total >= budget) {
+                if total == 0 {
+                    self.jit_loop_visits.insert(start, 0);
+                }
+                return Ok(total);
+            }
+        }
+    }
+
+    #[cfg(feature = "jit")]
+    fn execute_compiled_baseline(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        min_depth: usize,
+        budget: Option<usize>,
+        function: BaselineBlock,
+    ) -> Result<(usize, Option<RunInnerStatus<'gc>>), JSError> {
+        let start = self.ip;
         let mut state = BaselineState {
             vm: self,
             ctx,
@@ -364,7 +644,8 @@ impl<'gc> VM<'gc> {
         };
         // All JS references remain in traced VM storage. GC runs only after
         // the native call returns to the arena's slice boundary.
-        unsafe { function((&mut state as *mut BaselineState<'_, '_>).cast()) };
+        unsafe { function((&mut state as *mut BaselineState<'_, '_>).cast(), start) };
+        state.vm.jit_stats.baseline_opcodes += state.executed as u64;
         Ok((state.executed, state.outcome.transpose()?))
     }
 
@@ -798,6 +1079,14 @@ impl<'gc> VM<'gc> {
             }
             if let OpcodeAction::Exit(val) = action {
                 return Ok(RunInnerStatus::Complete(val));
+            }
+            #[cfg(feature = "jit")]
+            if instruction == Opcode::Jump
+                && self.ip < self.current_opcode_ip
+                && !opcode_budget.is_some_and(|budget| executed_opcodes >= budget)
+            {
+                let remaining = opcode_budget.map(|budget| budget - executed_opcodes);
+                executed_opcodes += self.execute_hot_numeric_loop(ctx, min_depth, remaining)?;
             }
         }
     }
@@ -9189,34 +9478,24 @@ impl<'gc> VM<'gc> {
         Ok(OpcodeAction::Continue)
     }
 
-    // Opcode::ReboxLocal — create a fresh upvalue cell for a local, copying the
-    // old value.  Used for per-iteration `let` bindings in `for` loops so that
-    // each iteration's closures capture an independent cell.
+    // Detach the preceding iteration's cell. MakeClosure/BoxLocal materialize
+    // the new binding only if it is captured; old closures retain the old cell.
     fn run_opcode_rebox_local(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let index = self.read_byte() as usize;
         let bp = self.frames.last().map(|f| f.bp).unwrap_or(0);
-        // Read the current value (through cell if boxed, else from stack)
-        let val = if let Some(frame) = self.frames.last() {
-            if let Some(cell) = frame.local_cells.get(&index) {
-                cell.borrow().clone()
-            } else if bp + index < self.stack.len() {
-                self.stack[bp + index].clone()
-            } else {
-                Value::Undefined
-            }
-        } else if let Some(cell) = self.top_level_cells.get(&index) {
-            cell.borrow().clone()
-        } else if bp + index < self.stack.len() {
-            self.stack[bp + index].clone()
+        let cells = if let Some(frame) = self.frames.last_mut() {
+            &mut frame.local_cells
         } else {
-            Value::Undefined
+            &mut self.top_level_cells
         };
-        // Always create a fresh cell (even if not yet boxed — BoxLocal will no-op later)
-        let new_cell = new_gc_cell_ptr(ctx, val);
-        if let Some(frame) = self.frames.last_mut() {
-            frame.local_cells.insert(index, new_cell);
+        let previous = cells.remove(&index);
+        if let Some(slot) = self.stack.get_mut(bp + index) {
+            if let Some(cell) = previous {
+                *slot = cell.borrow().clone();
+            }
         } else {
-            self.top_level_cells.insert(index, new_cell);
+            let value = previous.map_or(Value::Undefined, |cell| cell.borrow().clone());
+            cells.insert(index, new_gc_cell_ptr(ctx, value));
         }
         Ok(OpcodeAction::Continue)
     }
@@ -9298,5 +9577,97 @@ impl<'gc> VM<'gc> {
         PropDesc::data(Value::Number(len as f64), PropAttrs::empty()).write_to_map(&mut b.props, "length");
         b.props.insert("__non_extensible__".to_string(), Value::Boolean(true));
         b.props.insert("__frozen__".to_string(), Value::Boolean(true));
+    }
+}
+
+#[cfg(test)]
+mod iteration_binding_tests {
+    use super::*;
+
+    #[test]
+    fn uncaptured_iterations_do_not_materialize_cells() {
+        let mut arena = crate::core::JsArenaVm::new(|ctx| VM::new(crate::core::Chunk::new(), ctx));
+        arena.mutate_root(|ctx, vm| {
+            vm.chunk.code.push(0);
+            vm.stack.push(Value::Number(7.0));
+            for _ in 0..1000 {
+                vm.ip = 0;
+                vm.run_opcode_rebox_local(ctx).unwrap();
+                assert!(vm.top_level_cells.is_empty());
+                assert!(matches!(vm.stack[0], Value::Number(7.0)));
+            }
+        });
+    }
+
+    #[test]
+    fn detaching_a_captured_binding_preserves_old_cell_and_latest_value() {
+        let mut arena = crate::core::JsArenaVm::new(|ctx| VM::new(crate::core::Chunk::new(), ctx));
+        arena.mutate_root(|ctx, vm| {
+            vm.chunk.code.push(0);
+            vm.stack.push(Value::Number(1.0));
+            vm.run_opcode_box_local(ctx).unwrap();
+            let old = vm.top_level_cells[&0];
+            *old.borrow_mut(ctx) = Value::Number(9.0);
+            vm.ip = 0;
+            vm.run_opcode_rebox_local(ctx).unwrap();
+            assert!(vm.top_level_cells.is_empty());
+            assert!(matches!(vm.stack[0], Value::Number(9.0)));
+            vm.ip = 0;
+            vm.run_opcode_box_local(ctx).unwrap();
+            *vm.top_level_cells[&0].borrow_mut(ctx) = Value::Number(12.0);
+            assert!(matches!(*old.borrow(), Value::Number(9.0)));
+        });
+    }
+
+    #[cfg(feature = "jit")]
+    #[test]
+    fn numeric_loop_guards_preserve_temporary_cells_and_captured_iteration_bindings() {
+        let mut arena = crate::core::JsArenaVm::new(|ctx| VM::new(crate::core::Chunk::new(), ctx));
+        arena.mutate_root(|ctx, vm| {
+            vm.chunk.constants.push(Value::Number(1000.0));
+            vm.chunk.write_opcode(Opcode::GetLocal);
+            vm.chunk.write_byte(0);
+            vm.chunk.write_opcode(Opcode::Constant);
+            vm.chunk.write_u16(0);
+            vm.chunk.write_opcode(Opcode::LessThan);
+            vm.chunk.write_opcode(Opcode::JumpIfFalse);
+            let target = vm.chunk.code.len();
+            vm.chunk.write_u32(0);
+            vm.chunk.write_opcode(Opcode::ReboxLocal);
+            vm.chunk.write_byte(0);
+            vm.chunk.write_opcode(Opcode::GetLocal);
+            vm.chunk.write_byte(0);
+            vm.chunk.write_opcode(Opcode::Increment);
+            vm.chunk.write_opcode(Opcode::SetLocal);
+            vm.chunk.write_byte(0);
+            vm.chunk.write_opcode(Opcode::Pop);
+            vm.chunk.write_opcode(Opcode::Jump);
+            vm.chunk.write_u32(0);
+            let end = vm.chunk.code.len() as u32;
+            vm.chunk.code[target..target + 4].copy_from_slice(&end.to_le_bytes());
+            let plan = crate::runtime::jit::baseline::loops::NumericLoop::build(&vm.chunk, 0).unwrap();
+            vm.stack.push(Value::Number(0.0));
+            let mut scratch = vec![0.0; plan.metadata() + 2];
+            let mut state = BaselineState {
+                vm,
+                ctx,
+                min_depth: 0,
+                budget: None,
+                executed: 0,
+                outcome: None,
+            };
+            for slot in [1, 0] {
+                state.vm.top_level_cells.insert(slot, new_gc_cell_ptr(ctx, Value::Number(0.0)));
+                assert_eq!(
+                    unsafe { baseline_loop_prepare((&mut state as *mut BaselineState<'_, '_>).cast(), 0, &plan, scratch.as_mut_ptr()) },
+                    0
+                );
+                state.vm.top_level_cells.remove(&slot);
+            }
+            assert_eq!(
+                unsafe { baseline_loop_prepare((&mut state as *mut BaselineState<'_, '_>).cast(), 0, &plan, scratch.as_mut_ptr()) },
+                1
+            );
+        });
     }
 }

@@ -909,6 +909,8 @@ pub struct VM<'gc> {
     #[cfg(feature = "jit")]
     baseline_jit: Option<crate::runtime::jit::baseline::BaselineJit>,
     #[cfg(feature = "jit")]
+    jit_loop_visits: HashMap<usize, usize>,
+    #[cfg(feature = "jit")]
     jit_stats: crate::runtime::JitStats,
     jit_roots: Vec<Value<'gc>>,
     stop_requested: bool,
@@ -1334,6 +1336,8 @@ impl<'gc> VM<'gc> {
             jit_required: false,
             #[cfg(feature = "jit")]
             baseline_jit: None,
+            #[cfg(feature = "jit")]
+            jit_loop_visits: HashMap::new(),
             #[cfg(feature = "jit")]
             jit_stats: crate::runtime::JitStats::default(),
             jit_roots: Vec::new(),
@@ -3963,6 +3967,8 @@ impl<'gc> VM<'gc> {
         for child in self.child_realms.iter().flatten() {
             let child_stats = child.jit_stats();
             stats.baseline_opcodes += child_stats.baseline_opcodes;
+            stats.native_region_opcodes += child_stats.native_region_opcodes;
+            stats.native_loop_opcodes += child_stats.native_loop_opcodes;
             stats.interpreter_opcodes += child_stats.interpreter_opcodes;
             stats.optimized_calls += child_stats.optimized_calls;
         }
@@ -27051,6 +27057,8 @@ impl<'gc> VM<'gc> {
                     {
                         let stats = eval_vm.jit_stats();
                         self.jit_stats.baseline_opcodes += stats.baseline_opcodes;
+                        self.jit_stats.native_region_opcodes += stats.native_region_opcodes;
+                        self.jit_stats.native_loop_opcodes += stats.native_loop_opcodes;
                         self.jit_stats.interpreter_opcodes += stats.interpreter_opcodes;
                         self.jit_stats.optimized_calls += stats.optimized_calls;
                     }

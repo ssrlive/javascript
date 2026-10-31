@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 
 RESULT_PATTERN = re.compile(r"^BENCH_RESULT:([^:]+):([^:]+):(\d+)$", re.MULTILINE)
-SUITES = ("arithmetic", "function_calls", "objects_arrays")
+SUITES = ("arithmetic", "function_calls", "objects_arrays", "numeric_regions")
 
 BENCHMARK_SOURCE = r'''
 "use strict";
@@ -55,6 +55,18 @@ function objectsAndArrays(n) {
     return state.checksum + values[0] + values[values.length - 1];
 }
 
+function* numericRegionGenerator(n) {
+    let total = 0;
+    for (let i = 0; i < n; i++) {
+        total = total + i * 2 - i / 2;
+    }
+    yield total;
+}
+
+function numericRegions(n) {
+    return numericRegionGenerator(n).next().value;
+}
+
 function measure(name, workload) {
     workload(ITERATIONS);
     let checksum = 0;
@@ -69,6 +81,7 @@ function measure(name, workload) {
 measure("arithmetic", arithmetic);
 measure("function_calls", functionCalls);
 measure("objects_arrays", objectsAndArrays);
+measure("numeric_regions", numericRegions);
 '''
 
 
@@ -107,11 +120,12 @@ def run_engine(
     executable: str,
     script_path: Path,
     timeout: float,
+    extra_args: tuple[str, ...] = (),
 ) -> tuple[dict[str, tuple[str, int]], float]:
     start = time.perf_counter()
     try:
         result = subprocess.run(
-            [executable, str(script_path)],
+            [executable, *extra_args, str(script_path)],
             check=True,
             capture_output=True,
             text=True,
@@ -154,6 +168,7 @@ def main() -> int:
     parser.add_argument("--warmup", type=nonnegative_int, default=1, help="discarded process launches per engine")
     parser.add_argument("--iterations", type=positive_int, default=100_000, help="iterations per workload round")
     parser.add_argument("--timeout", type=positive_int, default=120, help="timeout in seconds per process launch")
+    parser.add_argument("--compare-jit", action="store_true", help="also measure required JIT against ordinary js-rs")
     args = parser.parse_args()
 
     try:
@@ -164,27 +179,29 @@ def main() -> int:
         print(f"Runs: {args.runs}, process warmups: {args.warmup}, iterations: {args.iterations:,}")
 
         source = BENCHMARK_SOURCE.replace("__ITERATIONS__", str(args.iterations))
-        wall_times: dict[str, list[float]] = {"node": [], "js-rs": []}
+        commands = [("node", node, ()), ("js-rs", js_rs, ())]
+        if args.compare_jit:
+            commands.append(("js-rs-jit", js_rs, ("--jit-required",)))
+        wall_times: dict[str, list[float]] = {engine: [] for engine, _, _ in commands}
         kernel_times: dict[str, dict[str, list[float]]] = {
             engine: {suite: [] for suite in SUITES} for engine in wall_times
         }
         checksums: dict[str, dict[str, str]] = {engine: {} for engine in wall_times}
-        commands = (("node", node), ("js-rs", js_rs))
 
         with tempfile.TemporaryDirectory(prefix="js-engine-bench-") as temp_dir:
             script_path = Path(temp_dir) / "benchmark.js"
             script_path.write_text(source, encoding="utf-8")
 
             for _ in range(args.warmup):
-                for engine, executable in commands:
-                    results, _ = run_engine(executable, script_path, args.timeout)
+                for engine, executable, extra_args in commands:
+                    results, _ = run_engine(executable, script_path, args.timeout, extra_args)
                     for suite, (checksum, _) in results.items():
                         checksums[engine].setdefault(suite, checksum)
 
             for run_index in range(args.runs):
                 order = commands if run_index % 2 == 0 else tuple(reversed(commands))
-                for engine, executable in order:
-                    results, wall_ms = run_engine(executable, script_path, args.timeout)
+                for engine, executable, extra_args in order:
+                    results, wall_ms = run_engine(executable, script_path, args.timeout, extra_args)
                     wall_times[engine].append(wall_ms)
                     for suite, (checksum, kernel_ms) in results.items():
                         expected = checksums[engine].setdefault(suite, checksum)
@@ -193,11 +210,12 @@ def main() -> int:
                         kernel_times[engine][suite].append(float(kernel_ms))
 
         for suite in SUITES:
-            if checksums["node"][suite] != checksums["js-rs"][suite]:
-                raise RuntimeError(
-                    f"{suite} checksum mismatch: Node.js={checksums['node'][suite]}, "
-                    f"js-rs={checksums['js-rs'][suite]}"
-                )
+            for engine in wall_times:
+                if checksums["node"][suite] != checksums[engine][suite]:
+                    raise RuntimeError(
+                        f"{suite} checksum mismatch: Node.js={checksums['node'][suite]}, "
+                        f"{engine}={checksums[engine][suite]}"
+                    )
 
         print("\nMedian in-script execution time (lower is faster; js-rs/Node > 1 means js-rs is slower)")
         print(f"{'workload':<18} {'Node.js':>12} {'js-rs':>12} {'js-rs/Node':>14}")
@@ -212,6 +230,16 @@ def main() -> int:
         print(f"Node.js: {node_wall:.1f} ms")
         print(f"js-rs:   {js_rs_wall:.1f} ms")
         print(f"js-rs/Node: {format_ratio(js_rs_wall, node_wall)}")
+        if args.compare_jit:
+            print("\nRequired JIT vs ordinary js-rs (ratio > 1 means JIT is slower)")
+            print(f"{'workload':<18} {'ordinary':>12} {'JIT':>12} {'JIT/ordinary':>14}")
+            for suite in SUITES:
+                ordinary_ms = median(kernel_times["js-rs"][suite])
+                jit_ms = median(kernel_times["js-rs-jit"][suite])
+                print(f"{suite:<18} {ordinary_ms:>9.1f} ms {jit_ms:>9.1f} ms {format_ratio(jit_ms, ordinary_ms):>14}")
+            jit_wall = median(wall_times["js-rs-jit"])
+            print(f"JIT end-to-end: {jit_wall:.1f} ms")
+            print(f"JIT/ordinary end-to-end: {format_ratio(jit_wall, js_rs_wall)}")
         print("\nChecksums matched for all workloads.")
     except (OSError, RuntimeError, subprocess.SubprocessError) as error:
         print(f"benchmark failed: {error}", file=sys.stderr)

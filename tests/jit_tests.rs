@@ -310,6 +310,53 @@ fn jit_dense_pop_preserves_length_descriptors_and_tail_identity() {
 }
 
 #[test]
+fn jit_string_borrowing_preserves_utf16_snapshots_and_coercion_order() {
+    let source = r#"
+        const results = [];
+        const text = "A\ud83d\ude00\ud800Z";
+        results.push(text.slice(1, 4).length, text.slice(1, 4).charCodeAt(2),
+                     text.charAt(3).charCodeAt(0), text.charCodeAt(2),
+                     text.slice(-2).charCodeAt(0), text.substring(3, 1).length,
+                     text.slice(Infinity).length, text.slice(-Infinity).length);
+        const events = [];
+        let current = "abcdef";
+        const receiver = {toString() { events.push("receiver"); return current; }};
+        const start = {valueOf() {
+            events.push("start");
+            current = "changed";
+            results.push("nested".slice(1, 3));
+            return 1;
+        }};
+        const end = {valueOf() { events.push("end"); return 4; }};
+        results.push(String.prototype.slice.call(receiver, start, end), current, events.join(","));
+        const boxed = new String("uvwxyz");
+        results.push(String.prototype.slice.call(boxed, 1, -1),
+                     String.prototype.charCodeAt.call(boxed, 2),
+                     String.prototype.indexOf.call(boxed, "xy"),
+                     "ab".toUpperCase(), "CD".toLowerCase(), "xy".repeat(2),
+                     "ab-cd".split("-").join("|"), "abc".replace("b", () => "X"),
+                     "abc".replace("missing", "unused"), " \tX\n".trim());
+        let called = 0;
+        const numeric = {valueOf() { called++; throw 17; }};
+        try { String.prototype.slice.call(null, numeric); } catch { results.push(called); }
+        try { "abc".slice(numeric, {valueOf() { called += 100; return 2; }}); }
+        catch (error) { results.push(error, called); }
+        results.join("|");
+    "#;
+    let expected = JsValue::String(
+        "3|55296|55296|56832|55296|2|0|5|es|bcd|changed|receiver,start,end|vwxy|119|3|AB|cd|xyxy|ab|cd|aXc|abc|X|0|17|1".into(),
+    );
+    for required in [false, true] {
+        let mut runtime = JsRuntime::with_gc_opcode_budget(1).unwrap();
+        runtime.set_jit_required(required);
+        assert_eq!(runtime.eval(source).unwrap(), expected);
+        if required {
+            assert_no_interpreter(&mut runtime);
+        }
+    }
+}
+
+#[test]
 fn jit_shared_regexp_matchers_preserve_live_state_captures_and_reentrancy() {
     let source = r#"
         const first = /(?<word>a+)(b)?/dg;

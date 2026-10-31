@@ -21,6 +21,7 @@ const BASELINE_SEMANTIC_TESTS: &[(&str, &[&str])] = &[
     ),
     ("jit_array_mutations_preserve_descriptors_prototypes_and_partial_effects", &["Call"]),
     ("jit_dense_pop_preserves_length_descriptors_and_tail_identity", &["Call"]),
+    ("jit_string_borrowing_preserves_utf16_snapshots_and_coercion_order", &["Call"]),
     ("jit_shared_regexp_matchers_preserve_live_state_captures_and_reentrancy", &["Call"]),
     (
         "jit_native_bitwise_loops_match_conversion_and_shift_semantics",

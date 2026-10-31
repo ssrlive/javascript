@@ -35289,8 +35289,8 @@ impl<'gc> VM<'gc> {
         let is_string_method = (BUILTIN_STRING_SPLIT..=BUILTIN_STRING_VALUEOF).contains(&id)
             || (BUILTIN_STRING_CODEPOINTAT..=BUILTIN_STRING_MATCHALL).contains(&id)
             || matches!(id, BUILTIN_STRING_AT | BUILTIN_STRING_ISWELLFORMED | BUILTIN_STRING_TOWELLFORMED);
-        let string_val: Option<Vec<u16>> = match &receiver {
-            Value::String(s) => Some(s.clone()),
+        let string_val: Option<std::borrow::Cow<'_, [u16]>> = match receiver {
+            Value::String(s) => Some(std::borrow::Cow::Borrowed(s)),
             Value::Symbol(_) if is_string_method => {
                 self.throw_type_error(ctx, "Cannot convert a Symbol value to a string");
                 return Value::Undefined;
@@ -35299,7 +35299,7 @@ impl<'gc> VM<'gc> {
                 let b = map.borrow();
                 if b.get("__type__").map(|v| value_to_string(v)).as_deref() == Some("String") {
                     match b.get("__value__") {
-                        Some(Value::String(s)) => Some(s.clone()),
+                        Some(Value::String(s)) => Some(std::borrow::Cow::Owned(s.clone())),
                         _ => None,
                     }
                 } else if is_string_value_method {
@@ -35309,7 +35309,7 @@ impl<'gc> VM<'gc> {
                 } else if is_string_method {
                     drop(b);
                     match self.vm_coerce_arg_to_string(ctx, receiver) {
-                        Some(s) => Some(crate::unicode::utf8_to_utf16(&s)),
+                        Some(s) => Some(std::borrow::Cow::Owned(crate::unicode::utf8_to_utf16(&s))),
                         None => return Value::Undefined,
                     }
                 } else {
@@ -35327,7 +35327,7 @@ impl<'gc> VM<'gc> {
                     return Value::Undefined;
                 }
                 match self.vm_coerce_arg_to_string(ctx, receiver) {
-                    Some(s) => Some(crate::unicode::utf8_to_utf16(&s)),
+                    Some(s) => Some(std::borrow::Cow::Owned(crate::unicode::utf8_to_utf16(&s))),
                     None => return Value::Undefined,
                 }
             }
@@ -35338,14 +35338,14 @@ impl<'gc> VM<'gc> {
                     return Value::Undefined;
                 }
                 match self.vm_coerce_arg_to_string(ctx, receiver) {
-                    Some(s) => Some(crate::unicode::utf8_to_utf16(&s)),
+                    Some(s) => Some(std::borrow::Cow::Owned(crate::unicode::utf8_to_utf16(&s))),
                     None => return Value::Undefined,
                 }
             }
             _ => None,
         };
-        if let Some(ref s) = string_val {
-            let rust_str = crate::unicode::utf16_to_utf8(s);
+        if let Some(s) = string_val.as_deref() {
+            let rust_str = std::cell::LazyCell::new(|| crate::unicode::utf16_to_utf8(s));
             match id {
                 BUILTIN_STRING_SPLIT => {
                     let limit = if let Some(lim_val) = args.get(1) {
@@ -35564,7 +35564,7 @@ impl<'gc> VM<'gc> {
                         if let Some(pos) = rust_str.find(&pattern) {
                             let matched = Value::from(&pattern);
                             let offset = Value::Number(pos as f64);
-                            let full_str = Value::from(&rust_str);
+                            let full_str = Value::from(&*rust_str);
                             let cb_args = vec![matched, offset, full_str];
                             let cb_result = match self.vm_call_function_value(ctx, &repl, &Value::Undefined, &cb_args) {
                                 Ok(v) => value_to_string(&v),
@@ -35573,7 +35573,7 @@ impl<'gc> VM<'gc> {
                             let result = format!("{}{}{}", &rust_str[..pos], cb_result, &rust_str[pos + pattern.len()..]);
                             return Value::from(&result);
                         }
-                        return Value::from(&rust_str);
+                        return Value::from(&*rust_str);
                     }
                     let replacement = match self.vm_coerce_arg_to_string(ctx, &repl) {
                         Some(s) => s,
@@ -35588,7 +35588,7 @@ impl<'gc> VM<'gc> {
                         result.extend_from_slice(&s[pos + pattern_u16.len()..]);
                         return Value::String(result);
                     }
-                    return Value::from(&rust_str);
+                    return Value::from(&*rust_str);
                 }
                 BUILTIN_STRING_REPLACEALL => {
                     let pattern = match args.first() {
@@ -35640,7 +35640,7 @@ impl<'gc> VM<'gc> {
                                 &[
                                     Value::String(pattern_u16.clone()),
                                     Value::Number(position as f64),
-                                    Value::String(s.clone()),
+                                    Value::String(s.to_vec()),
                                 ],
                             ) {
                                 Ok(v) => v,
@@ -35668,7 +35668,7 @@ impl<'gc> VM<'gc> {
                     if self.pending_throw.is_some() {
                         return Value::Undefined;
                     }
-                    let string_arg = Value::String(s.clone());
+                    let string_arg = Value::String(s.to_vec());
                     if let Some(result) =
                         self.maybe_dispatch_string_symbol_method(ctx, Some(&re), "@@sym:7", "[Symbol.match]", &string_arg, &[])
                     {
@@ -35683,7 +35683,7 @@ impl<'gc> VM<'gc> {
                     if self.pending_throw.is_some() {
                         return Value::Undefined;
                     }
-                    let string_arg = Value::String(s.clone());
+                    let string_arg = Value::String(s.to_vec());
                     if let Some(result) =
                         self.maybe_dispatch_string_symbol_method(ctx, Some(&re), "@@sym:9", "[Symbol.search]", &string_arg, &[])
                     {
@@ -35762,7 +35762,7 @@ impl<'gc> VM<'gc> {
                     return Value::Boolean(s[..end_pos].ends_with(suffix.as_slice()));
                 }
                 BUILTIN_STRING_TOSTRING | BUILTIN_STRING_VALUEOF => {
-                    return Value::String(s.clone());
+                    return Value::String(s.to_vec());
                 }
                 BUILTIN_STRING_SUBSTRING => {
                     let len = s.len() as i64;
@@ -36006,7 +36006,7 @@ impl<'gc> VM<'gc> {
                     if self.pending_throw.is_some() {
                         return Value::Undefined;
                     }
-                    let string_arg = Value::String(s.clone());
+                    let string_arg = Value::String(s.to_vec());
                     if let Some(result) =
                         self.maybe_dispatch_string_symbol_method(ctx, Some(&re), "@@sym:11", "[Symbol.matchAll]", &string_arg, &[])
                     {

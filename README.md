@@ -171,6 +171,11 @@ and flag keys. Match state and `lastIndex` remain
 per execution/receiver. Unchanged UTF-16 inputs are borrowed, and legacy RegExp
 static captures are updated in place without reallocating property keys or
 changing their observable values.
+String builtin helpers borrow primitive UTF-16 receivers and convert to UTF-8
+only for operations that require it. Boxed/coercible receivers still use owned
+input snapshots before argument coercion or callbacks; code-unit operations
+such as `slice` and `charCodeAt` keep the original UTF-16 input. This reduces
+helper allocations without native String loop lowering.
 
 Numeric indexed access avoids property-key construction for real TypedArrays
 and verified existing dense-array elements. TypedArray writes reuse the ordinary

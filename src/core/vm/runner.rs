@@ -1613,9 +1613,10 @@ impl<'gc> VM<'gc> {
         let callee = self.stack[callee_idx].clone();
         match callee {
             Value::Function(target_ip, arity) => {
+                let call_info = self.function_call_info(target_ip);
                 // Class constructors cannot be called without `new` — check
                 // early so cross-realm dispatch doesn't bypass the guard.
-                if !is_method && self.chunk.class_constructor_ips.contains(&target_ip) {
+                if !is_method && call_info.is_class_constructor {
                     let base = callee_idx;
                     self.stack.truncate(base);
                     // Create TypeError from the function's realm (cross-realm or current).
@@ -1664,7 +1665,7 @@ impl<'gc> VM<'gc> {
                     self.stack.push(result);
                     return Ok(OpcodeAction::Continue);
                 }
-                if self.chunk.async_function_ips.contains(&target_ip) && !self.chunk.generator_function_ips.contains(&target_ip) {
+                if call_info.is_async && !call_info.is_generator {
                     let args_vec: Vec<Value<'gc>> = self.stack[callee_idx + 1..callee_idx + 1 + arg_count].to_vec();
                     let receiver = if is_method {
                         self.stack.get(callee_idx.saturating_sub(1)).cloned().unwrap_or(Value::Undefined)
@@ -1673,7 +1674,7 @@ impl<'gc> VM<'gc> {
                     };
                     let base = if is_method { callee_idx.saturating_sub(1) } else { callee_idx };
                     self.stack.truncate(base);
-                    if self.chunk.named_fn_self_ips.contains(&target_ip) {
+                    if call_info.is_named_self {
                         self.named_fn_callee_stack.push(callee.clone());
                     }
                     let promise = self.invoke_async_function(ctx, target_ip, arity, &args_vec, &[], &receiver);
@@ -1681,7 +1682,7 @@ impl<'gc> VM<'gc> {
                     return Ok(OpcodeAction::Continue);
                 }
                 // Async generator function: create async generator object without running body.
-                if self.chunk.generator_function_ips.contains(&target_ip) && self.chunk.async_function_ips.contains(&target_ip) {
+                if call_info.is_generator && call_info.is_async {
                     let args_vec: Vec<Value<'gc>> = self.stack[callee_idx + 1..callee_idx + 1 + arg_count].to_vec();
                     let this_val = if is_method {
                         self.stack.get(callee_idx.saturating_sub(1)).cloned().unwrap_or(Value::Undefined)
@@ -1690,7 +1691,7 @@ impl<'gc> VM<'gc> {
                     };
                     let base = if is_method { callee_idx.saturating_sub(1) } else { callee_idx };
                     self.stack.truncate(base);
-                    if self.chunk.named_fn_self_ips.contains(&target_ip) {
+                    if call_info.is_named_self {
                         self.named_fn_callee_stack.push(callee.clone());
                     }
                     let gen_obj = match self.create_generator_object(ctx, &callee, target_ip, arity, &args_vec, &[], &this_val, true) {
@@ -1704,7 +1705,7 @@ impl<'gc> VM<'gc> {
                     return Ok(OpcodeAction::Continue);
                 }
                 // Generator function: create generator object without running body
-                if self.chunk.generator_function_ips.contains(&target_ip) && !self.chunk.async_function_ips.contains(&target_ip) {
+                if call_info.is_generator && !call_info.is_async {
                     let args_vec: Vec<Value<'gc>> = self.stack[callee_idx + 1..callee_idx + 1 + arg_count].to_vec();
                     let this_val = if is_method {
                         self.stack.get(callee_idx.saturating_sub(1)).cloned().unwrap_or(Value::Undefined)
@@ -1713,7 +1714,7 @@ impl<'gc> VM<'gc> {
                     };
                     let base = if is_method { callee_idx.saturating_sub(1) } else { callee_idx };
                     self.stack.truncate(base);
-                    if self.chunk.named_fn_self_ips.contains(&target_ip) {
+                    if call_info.is_named_self {
                         self.named_fn_callee_stack.push(callee.clone());
                     }
                     let gen_obj = match self.create_generator_object(ctx, &callee, target_ip, arity, &args_vec, &[], &this_val, false) {
@@ -1726,7 +1727,7 @@ impl<'gc> VM<'gc> {
                     self.stack.push(gen_obj);
                     return Ok(OpcodeAction::Continue);
                 }
-                if is_method && self.chunk.class_constructor_ips.contains(&target_ip) {
+                if is_method && call_info.is_class_constructor {
                     let in_ctor_context = self.frames.iter().any(|f| self.chunk.class_constructor_ips.contains(&f.func_ip));
                     if !in_ctor_context {
                         let receiver = self.stack.get(callee_idx.saturating_sub(1)).cloned().unwrap_or(Value::Undefined);
@@ -1750,16 +1751,16 @@ impl<'gc> VM<'gc> {
                         return Ok(OpcodeAction::Continue);
                     }
                 }
-                let derived_tdz = if is_method && self.chunk.derived_constructor_ips.contains(&target_ip) {
+                let derived_tdz = if is_method && call_info.is_derived_constructor {
                     Some(true)
                 } else {
                     None
                 };
                 let receiver_or_this = if is_method {
                     Some(self.stack[callee_idx - 1].clone())
-                } else if self.chunk.arrow_function_ips.contains(&target_ip) {
+                } else if call_info.is_arrow {
                     None
-                } else if self.chunk.fn_strictness.get(&target_ip).copied().unwrap_or(false) {
+                } else if call_info.is_strict {
                     Some(Value::Undefined)
                 } else {
                     Some(Value::Object(self.global_this))
@@ -1812,12 +1813,13 @@ impl<'gc> VM<'gc> {
                     receiver_or_this,
                     derived_tdz,
                 );
-                if self.chunk.named_fn_self_ips.contains(&target_ip) {
+                if call_info.is_named_self {
                     self.named_fn_callee_stack.push(callee.clone());
                 }
                 self.ip = target_ip;
             }
             Value::Closure(target_ip, arity, ref upvals) => {
+                let call_info = self.function_call_info(target_ip);
                 if !is_method
                     && arg_count == arity as usize
                     && let Some(entry) = self.jit_functions.get(&target_ip)
@@ -1864,7 +1866,7 @@ impl<'gc> VM<'gc> {
                 }
                 // Class constructors cannot be called without `new` — check
                 // early so cross-realm dispatch doesn't bypass the guard.
-                if !is_method && self.chunk.class_constructor_ips.contains(&target_ip) {
+                if !is_method && call_info.is_class_constructor {
                     let base = callee_idx;
                     self.stack.truncate(base);
                     let err = if let Some(&realm_id) = self.fn_realm.get(&target_ip)
@@ -1912,7 +1914,7 @@ impl<'gc> VM<'gc> {
                     self.stack.push(result);
                     return Ok(OpcodeAction::Continue);
                 }
-                if self.chunk.async_function_ips.contains(&target_ip) && !self.chunk.generator_function_ips.contains(&target_ip) {
+                if call_info.is_async && !call_info.is_generator {
                     let args_vec: Vec<Value<'gc>> = self.stack[callee_idx + 1..callee_idx + 1 + arg_count].to_vec();
                     let receiver = if is_method {
                         self.stack.get(callee_idx.saturating_sub(1)).cloned().unwrap_or(Value::Undefined)
@@ -1921,7 +1923,7 @@ impl<'gc> VM<'gc> {
                     };
                     let base = if is_method { callee_idx.saturating_sub(1) } else { callee_idx };
                     self.stack.truncate(base);
-                    if self.chunk.named_fn_self_ips.contains(&target_ip) {
+                    if call_info.is_named_self {
                         self.named_fn_callee_stack.push(callee.clone());
                     }
                     let promise = self.invoke_async_function(ctx, target_ip, arity, &args_vec, upvals, &receiver);
@@ -1929,7 +1931,7 @@ impl<'gc> VM<'gc> {
                     return Ok(OpcodeAction::Continue);
                 }
                 // Async generator closure: create async generator object without running body.
-                if self.chunk.generator_function_ips.contains(&target_ip) && self.chunk.async_function_ips.contains(&target_ip) {
+                if call_info.is_generator && call_info.is_async {
                     let args_vec: Vec<Value<'gc>> = self.stack[callee_idx + 1..callee_idx + 1 + arg_count].to_vec();
                     let this_val = if is_method {
                         self.stack.get(callee_idx.saturating_sub(1)).cloned().unwrap_or(Value::Undefined)
@@ -1938,7 +1940,7 @@ impl<'gc> VM<'gc> {
                     };
                     let base = if is_method { callee_idx.saturating_sub(1) } else { callee_idx };
                     self.stack.truncate(base);
-                    if self.chunk.named_fn_self_ips.contains(&target_ip) {
+                    if call_info.is_named_self {
                         self.named_fn_callee_stack.push(callee.clone());
                     }
                     let gen_obj = match self.create_generator_object(ctx, &callee, target_ip, arity, &args_vec, upvals, &this_val, true) {
@@ -1952,7 +1954,7 @@ impl<'gc> VM<'gc> {
                     return Ok(OpcodeAction::Continue);
                 }
                 // Generator closure: create generator object without running body
-                if self.chunk.generator_function_ips.contains(&target_ip) && !self.chunk.async_function_ips.contains(&target_ip) {
+                if call_info.is_generator && !call_info.is_async {
                     let args_vec: Vec<Value<'gc>> = self.stack[callee_idx + 1..callee_idx + 1 + arg_count].to_vec();
                     let this_val = if is_method {
                         self.stack.get(callee_idx.saturating_sub(1)).cloned().unwrap_or(Value::Undefined)
@@ -1961,7 +1963,7 @@ impl<'gc> VM<'gc> {
                     };
                     let base = if is_method { callee_idx.saturating_sub(1) } else { callee_idx };
                     self.stack.truncate(base);
-                    if self.chunk.named_fn_self_ips.contains(&target_ip) {
+                    if call_info.is_named_self {
                         self.named_fn_callee_stack.push(callee.clone());
                     }
                     let gen_obj = match self.create_generator_object(ctx, &callee, target_ip, arity, &args_vec, upvals, &this_val, false) {
@@ -1974,7 +1976,7 @@ impl<'gc> VM<'gc> {
                     self.stack.push(gen_obj);
                     return Ok(OpcodeAction::Continue);
                 }
-                if is_method && self.chunk.class_constructor_ips.contains(&target_ip) {
+                if is_method && call_info.is_class_constructor {
                     let in_ctor_context = self.frames.iter().any(|f| self.chunk.class_constructor_ips.contains(&f.func_ip));
                     if !in_ctor_context {
                         let receiver = self.stack.get(callee_idx.saturating_sub(1)).cloned().unwrap_or(Value::Undefined);
@@ -1999,16 +2001,16 @@ impl<'gc> VM<'gc> {
                     }
                 }
                 let closure_upvalues = (**upvals).clone();
-                let derived_tdz = if is_method && self.chunk.derived_constructor_ips.contains(&target_ip) {
+                let derived_tdz = if is_method && call_info.is_derived_constructor {
                     Some(true)
                 } else {
                     None
                 };
                 let receiver_or_this = if is_method {
                     Some(self.stack[callee_idx - 1].clone())
-                } else if self.chunk.arrow_function_ips.contains(&target_ip) {
+                } else if call_info.is_arrow {
                     None
-                } else if self.chunk.fn_strictness.get(&target_ip).copied().unwrap_or(false) {
+                } else if call_info.is_strict {
                     Some(Value::Undefined)
                 } else {
                     Some(Value::Object(self.global_this))
@@ -2024,7 +2026,7 @@ impl<'gc> VM<'gc> {
                     receiver_or_this,
                     derived_tdz,
                 );
-                if self.chunk.named_fn_self_ips.contains(&target_ip) {
+                if call_info.is_named_self {
                     self.named_fn_callee_stack.push(callee.clone());
                 }
                 self.ip = target_ip;

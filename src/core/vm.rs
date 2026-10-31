@@ -821,6 +821,17 @@ struct JitFunctionEntry {
     dependencies: Vec<crate::host_api::JitDependency>,
 }
 
+#[derive(Clone, Copy, Default)]
+struct FunctionCallInfo {
+    is_class_constructor: bool,
+    is_derived_constructor: bool,
+    is_async: bool,
+    is_generator: bool,
+    is_arrow: bool,
+    is_strict: bool,
+    is_named_self: bool,
+}
+
 unsafe impl<'gc> Collect<'gc> for VM<'gc> {
     fn trace<T: GcTrace<'gc>>(&self, cc: &mut T) {
         self.chunk.trace(cc);
@@ -914,6 +925,7 @@ pub struct VM<'gc> {
     jit_stats: crate::runtime::JitStats,
     jit_roots: Vec<Value<'gc>>,
     collection_lookup_hints: RefCell<HashMap<(usize, u64), usize>>,
+    function_call_info_cache: HashMap<usize, FunctionCallInfo>,
     stop_requested: bool,
     // Property storage for Function values, keyed by function IP
     fn_props: HashMap<usize, ObjectHandle<'gc>>,
@@ -1343,6 +1355,7 @@ impl<'gc> VM<'gc> {
             jit_stats: crate::runtime::JitStats::default(),
             jit_roots: Vec::new(),
             collection_lookup_hints: RefCell::new(HashMap::new()),
+            function_call_info_cache: HashMap::new(),
             stop_requested: false,
             fn_props: HashMap::new(),
             fn_realm: HashMap::new(),
@@ -1438,6 +1451,23 @@ impl<'gc> VM<'gc> {
         let mut child = Self::new(chunk, ctx);
         child.host_modules = self.host_modules.clone();
         child
+    }
+
+    fn function_call_info(&mut self, ip: usize) -> FunctionCallInfo {
+        if let Some(info) = self.function_call_info_cache.get(&ip).copied() {
+            return info;
+        }
+        let info = FunctionCallInfo {
+            is_class_constructor: self.chunk.class_constructor_ips.contains(&ip),
+            is_derived_constructor: self.chunk.derived_constructor_ips.contains(&ip),
+            is_async: self.chunk.async_function_ips.contains(&ip),
+            is_generator: self.chunk.generator_function_ips.contains(&ip),
+            is_arrow: self.chunk.arrow_function_ips.contains(&ip),
+            is_strict: self.chunk.fn_strictness.get(&ip).copied().unwrap_or(false),
+            is_named_self: self.chunk.named_fn_self_ips.contains(&ip),
+        };
+        self.function_call_info_cache.insert(ip, info);
+        info
     }
 
     pub fn set_source_context(&mut self, script_source: &str, script_path: Option<&std::path::Path>) {
@@ -20609,6 +20639,7 @@ impl<'gc> VM<'gc> {
     ) -> Result<Value<'gc>, JSError> {
         match func {
             Value::Function(ip, arity) => {
+                let call_info = self.function_call_info(*ip);
                 if let Some(&realm_id) = self.fn_realm.get(ip)
                     && realm_id < self.child_realms.len()
                     && let Some(mut child) = self.child_realms[realm_id].take()
@@ -20638,30 +20669,19 @@ impl<'gc> VM<'gc> {
                     let parent = unsafe { &mut *parent_ptr };
                     return parent.vm_call_function_value(ctx, func, this_arg, args);
                 }
-                if self.chunk.async_function_ips.contains(ip) && !self.chunk.generator_function_ips.contains(ip) {
-                    if self.chunk.named_fn_self_ips.contains(ip) {
+                if call_info.is_async && !call_info.is_generator {
+                    if call_info.is_named_self {
                         self.named_fn_callee_stack.push(func.clone());
                     }
                     return Ok(self.invoke_async_function(ctx, *ip, *arity, args, &[], this_arg));
                 }
-                if self.chunk.generator_function_ips.contains(ip) {
-                    if self.chunk.named_fn_self_ips.contains(ip) {
+                if call_info.is_generator {
+                    if call_info.is_named_self {
                         self.named_fn_callee_stack.push(func.clone());
                     }
-                    return self.create_generator_object(
-                        ctx,
-                        func,
-                        *ip,
-                        *arity,
-                        args,
-                        &[],
-                        this_arg,
-                        self.chunk.async_function_ips.contains(ip),
-                    );
+                    return self.create_generator_object(ctx, func, *ip, *arity, args, &[], this_arg, call_info.is_async);
                 }
-                let is_arrow = self.chunk.arrow_function_ips.contains(ip);
-                let fn_strict = self.chunk.fn_strictness.get(ip).copied().unwrap_or(false);
-                let effective_this = if is_arrow || fn_strict {
+                let effective_this = if call_info.is_arrow || call_info.is_strict {
                     this_arg.clone()
                 } else {
                     self.coerce_this_for_helper_call(ctx, this_arg)
@@ -20677,7 +20697,7 @@ impl<'gc> VM<'gc> {
                     stack_args.truncate(target_arity);
                 }
                 self.this_stack.push(effective_this);
-                if self.chunk.named_fn_self_ips.contains(ip) {
+                if call_info.is_named_self {
                     self.named_fn_callee_stack.push(func.clone());
                 }
                 let saved_try_stack = std::mem::take(&mut self.try_stack);
@@ -20687,6 +20707,7 @@ impl<'gc> VM<'gc> {
                 out
             }
             Value::Closure(ip, arity, upv) => {
+                let call_info = self.function_call_info(*ip);
                 if let Some(&realm_id) = self.fn_realm.get(ip)
                     && realm_id < self.child_realms.len()
                     && let Some(mut child) = self.child_realms[realm_id].take()
@@ -20712,32 +20733,21 @@ impl<'gc> VM<'gc> {
                     let parent = unsafe { &mut *parent_ptr };
                     return parent.vm_call_function_value(ctx, func, this_arg, args);
                 }
-                if self.chunk.async_function_ips.contains(ip) && !self.chunk.generator_function_ips.contains(ip) {
+                if call_info.is_async && !call_info.is_generator {
                     let uv = (**upv).to_vec();
-                    if self.chunk.named_fn_self_ips.contains(ip) {
+                    if call_info.is_named_self {
                         self.named_fn_callee_stack.push(func.clone());
                     }
                     return Ok(self.invoke_async_function(ctx, *ip, *arity, args, &uv, this_arg));
                 }
-                if self.chunk.generator_function_ips.contains(ip) {
+                if call_info.is_generator {
                     let uv = (**upv).to_vec();
-                    if self.chunk.named_fn_self_ips.contains(ip) {
+                    if call_info.is_named_self {
                         self.named_fn_callee_stack.push(func.clone());
                     }
-                    return self.create_generator_object(
-                        ctx,
-                        func,
-                        *ip,
-                        *arity,
-                        args,
-                        &uv,
-                        this_arg,
-                        self.chunk.async_function_ips.contains(ip),
-                    );
+                    return self.create_generator_object(ctx, func, *ip, *arity, args, &uv, this_arg, call_info.is_async);
                 }
-                let is_arrow = self.chunk.arrow_function_ips.contains(ip);
-                let fn_strict = self.chunk.fn_strictness.get(ip).copied().unwrap_or(false);
-                let effective_this = if is_arrow || fn_strict {
+                let effective_this = if call_info.is_arrow || call_info.is_strict {
                     this_arg.clone()
                 } else {
                     self.coerce_this_for_helper_call(ctx, this_arg)
@@ -20754,7 +20764,7 @@ impl<'gc> VM<'gc> {
                 }
                 self.this_stack.push(effective_this);
                 let uv = (**upv).to_vec();
-                if self.chunk.named_fn_self_ips.contains(ip) {
+                if call_info.is_named_self {
                     self.named_fn_callee_stack.push(func.clone());
                 }
                 let saved_try_stack = std::mem::take(&mut self.try_stack);

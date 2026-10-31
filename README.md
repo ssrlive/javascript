@@ -220,6 +220,9 @@ opcode-specific VM semantic helper calls, not an interpreter dispatch loop.
 Methods, constructors, callbacks, closures, tagged values, and coercion side
 effects use the same VM semantics as the interpreter. This is helper-backed
 coverage, not a claim that those operations have optimized native lowering.
+Call dispatch also caches per-function call-mode metadata (strictness,
+constructor/generator/async flags, named-self status) to avoid repeated
+hash-set lookups on hot invocation paths.
 
 The CLI accepts `--jit-required`, and the Test262 runner accepts the same mode
 for selected subsets, for example:

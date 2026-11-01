@@ -20730,22 +20730,22 @@ impl<'gc> VM<'gc> {
                 } else {
                     self.coerce_this_for_helper_call(ctx, this_arg)
                 };
-                let mut stack_args = args.to_vec();
                 let target_arity = *arity as usize;
-                let mut saved_args: Option<Vec<Value<'gc>>> = None;
-                if stack_args.len() < target_arity {
-                    saved_args = Some(stack_args.clone());
+                let padded_stack_args = if args.len() < target_arity {
+                    let mut stack_args = args.to_vec();
                     stack_args.resize(target_arity, Value::Undefined);
-                } else if stack_args.len() > target_arity {
-                    saved_args = Some(stack_args.clone());
-                    stack_args.truncate(target_arity);
-                }
+                    Some(stack_args)
+                } else {
+                    None
+                };
+                let stack_args = padded_stack_args.as_deref().unwrap_or_else(|| &args[..target_arity]);
+                let saved_args = (args.len() != target_arity).then(|| args.to_vec());
                 self.this_stack.push(effective_this);
                 if call_info.is_named_self {
                     self.named_fn_callee_stack.push(func.clone());
                 }
                 let saved_try_stack = std::mem::take(&mut self.try_stack);
-                let out = self.call_vm_function_result(ctx, *ip, &stack_args, saved_args, &[]);
+                let out = self.call_vm_function_result(ctx, *ip, stack_args, saved_args, &[]);
                 self.try_stack = saved_try_stack;
                 self.this_stack.pop();
                 out
@@ -20796,23 +20796,23 @@ impl<'gc> VM<'gc> {
                 } else {
                     self.coerce_this_for_helper_call(ctx, this_arg)
                 };
-                let mut stack_args = args.to_vec();
                 let target_arity = *arity as usize;
-                let mut saved_args: Option<Vec<Value<'gc>>> = None;
-                if stack_args.len() < target_arity {
-                    saved_args = Some(stack_args.clone());
+                let padded_stack_args = if args.len() < target_arity {
+                    let mut stack_args = args.to_vec();
                     stack_args.resize(target_arity, Value::Undefined);
-                } else if stack_args.len() > target_arity {
-                    saved_args = Some(stack_args.clone());
-                    stack_args.truncate(target_arity);
-                }
+                    Some(stack_args)
+                } else {
+                    None
+                };
+                let stack_args = padded_stack_args.as_deref().unwrap_or_else(|| &args[..target_arity]);
+                let saved_args = (args.len() != target_arity).then(|| args.to_vec());
                 self.this_stack.push(effective_this);
                 let uv = (**upv).to_vec();
                 if call_info.is_named_self {
                     self.named_fn_callee_stack.push(func.clone());
                 }
                 let saved_try_stack = std::mem::take(&mut self.try_stack);
-                let out = self.call_vm_function_result(ctx, *ip, &stack_args, saved_args, &uv);
+                let out = self.call_vm_function_result(ctx, *ip, stack_args, saved_args, &uv);
                 self.try_stack = saved_try_stack;
                 self.this_stack.pop();
                 out
@@ -34228,59 +34228,71 @@ impl<'gc> VM<'gc> {
                     }
                     let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
                     let is_ta_method = self.in_typed_array_method;
-                    let (logical_len, present_indices) = {
+                    let logical_len = {
                         let borrow = arr.borrow();
-                        (
-                            self.vm_array_logical_length_u64(&borrow).min(usize::MAX as u64) as usize,
-                            self.vm_array_present_indices(&borrow),
-                        )
+                        self.vm_array_logical_length_u64(&borrow).min(usize::MAX as u64) as usize
                     };
-                    let result = match self.create_vm_sparse_array(ctx, logical_len) {
-                        Value::Array(result_arr) => result_arr,
-                        _ => unreachable!(),
-                    };
-                    let receiver_value = Value::Array(*arr);
-                    if is_ta_method {
-                        for idx in 0..logical_len {
-                            self.maybe_sync_resizable_ta(ctx, arr);
-                            let key = idx.to_string();
-                            let elem = self.read_named_property(ctx, &receiver_value, &key);
-                            if self.pending_throw.is_some() {
-                                return Value::Undefined;
-                            }
-                            let mapped = match self.vm_call_function_value(
-                                ctx,
-                                &callback,
-                                &this_arg,
-                                &[elem, Value::Number(idx as f64), receiver_value.clone()],
-                            ) {
-                                Ok(v) => v,
-                                Err(err) => {
-                                    self.set_pending_throw_from_error(&err);
-                                    return Value::Undefined;
-                                }
-                            };
-                            self.vm_array_store_index(ctx, &result, idx, mapped);
+                    let (result, dense_result) = if logical_len <= 1024 {
+                        match self.create_vm_array(ctx, vec![Value::Undefined; logical_len]) {
+                            Value::Array(result_arr) => (result_arr, true),
+                            _ => unreachable!(),
                         }
                     } else {
-                        for idx in present_indices {
+                        match self.create_vm_sparse_array(ctx, logical_len) {
+                            Value::Array(result_arr) => (result_arr, false),
+                            _ => unreachable!(),
+                        }
+                    };
+                    let receiver_value = Value::Array(*arr);
+                    for idx in 0..logical_len {
+                        let elem = if is_ta_method {
+                            self.maybe_sync_resizable_ta(ctx, arr);
                             let key = idx.to_string();
-                            let elem = self.read_named_property(ctx, &receiver_value, &key);
+                            Some(self.read_named_property(ctx, &receiver_value, &key))
+                        } else if let Some(elem) = self.ordinary_dense_array_element(&receiver_value, idx) {
+                            Some(elem)
+                        } else {
+                            let key = idx.to_string();
+                            let present = self.has_property_in_chain(ctx, &receiver_value, &key);
                             if self.pending_throw.is_some() {
                                 return Value::Undefined;
                             }
-                            let mapped = match self.vm_call_function_value(
-                                ctx,
-                                &callback,
-                                &this_arg,
-                                &[elem, Value::Number(idx as f64), receiver_value.clone()],
-                            ) {
-                                Ok(v) => v,
-                                Err(err) => {
-                                    self.set_pending_throw_from_error(&err);
-                                    return Value::Undefined;
+                            if present {
+                                Some(self.read_named_property(ctx, &receiver_value, &key))
+                            } else {
+                                if dense_result {
+                                    result
+                                        .borrow_mut(ctx)
+                                        .props
+                                        .insert(format!("__deleted_{idx}"), Value::Boolean(true));
                                 }
-                            };
+                                None
+                            }
+                        };
+                        let Some(elem) = elem else {
+                            if self.pending_throw.is_some() {
+                                return Value::Undefined;
+                            }
+                            continue;
+                        };
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                        let mapped = match self.vm_call_function_value(
+                            ctx,
+                            &callback,
+                            &this_arg,
+                            &[elem, Value::Number(idx as f64), receiver_value.clone()],
+                        ) {
+                            Ok(v) => v,
+                            Err(err) => {
+                                self.set_pending_throw_from_error(&err);
+                                return Value::Undefined;
+                            }
+                        };
+                        if dense_result {
+                            result.borrow_mut(ctx).elements[idx] = mapped;
+                        } else {
                             self.vm_array_store_index(ctx, &result, idx, mapped);
                         }
                     }

@@ -64,6 +64,27 @@ fn jit_direct_numeric_callbacks_preserve_throw_boundaries_and_unused_arguments()
 
 #[test]
 fn jit_array_callback_elements_observe_live_mutations_and_species() {
+    let live_mutation_source = r#"
+        const array = [1,2,3,4];
+        array.map((value,index) => {
+            if (index === 0) {
+                delete array[1];
+                Object.defineProperty(array, "2", {get() { return 17; }, configurable:true});
+                array[3] = 23;
+                array.push(99);
+            }
+            return value * 2;
+        }).join(",");
+    "#;
+    for required in [false, true] {
+        let mut runtime = JsRuntime::new();
+        runtime.set_jit_required(required);
+        assert_eq!(runtime.eval(live_mutation_source).unwrap(), JsValue::String("2,,34,46".into()));
+        if required {
+            assert_no_interpreter(&mut runtime);
+        }
+    }
+
     let source = r#"
         const result = [];
         const dense = [1,2,3,4];

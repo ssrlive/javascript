@@ -2062,6 +2062,36 @@ fn jit_own_numeric_property_reads_preserve_proxy_and_accessor_semantics() {
 }
 
 #[test]
+fn jit_own_method_lookup_preserves_receiver_and_exotic_fallbacks() {
+    let source = r#"
+        let proxyGets = 0;
+        const object = { value: 4, method() { return this.value; } };
+        const accessor = {
+            value: 6,
+            get method() {
+                return function() { return this.value; };
+            }
+        };
+        const proxy = new Proxy(object, {
+            get(target, key, receiver) {
+                proxyGets++;
+                return Reflect.get(target, key, receiver);
+            }
+        });
+        object.method() + "|" + accessor.method() + "|" + proxy.method() + "|" + proxyGets;
+    "#;
+    let mut interpreter = JsRuntime::new();
+    let expected = interpreter.eval(source).unwrap();
+    let mut runtime = JsRuntime::new();
+    runtime.set_jit_required(true);
+
+    let result = runtime.eval(source).unwrap();
+
+    assert_eq!(result, expected);
+    assert_eq!(result, JsValue::String("4|6|4|2".into()));
+}
+
+#[test]
 fn jit_baseline_classes_preserve_super_receivers_and_descriptors() {
     assert_baseline_matches(
         r#"

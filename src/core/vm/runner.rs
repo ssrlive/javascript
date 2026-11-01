@@ -7497,6 +7497,20 @@ impl<'gc> VM<'gc> {
             self.stack.push(Value::Undefined);
             return Ok(OpcodeAction::Continue);
         }
+        if !key.contains(PRIVATE_KEY_PREFIX)
+            && key != "__proto__"
+            && let Value::Object(map) = &obj
+        {
+            let properties = map.borrow();
+            if !properties.contains_key("__proxy_target__")
+                && !properties.contains_key("__module_namespace__")
+                && !matches!(properties.get("__realm_id__"), Some(Value::Number(_)))
+                && let Some(method @ (Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_))) = properties.get(&key)
+            {
+                self.stack.push(method.clone());
+                return Ok(OpcodeAction::Continue);
+            }
+        }
         let method = match &obj {
             Value::Object(map) => {
                 // Private field access bypasses proxy traps — read directly from the object's map

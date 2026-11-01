@@ -2032,8 +2032,6 @@ impl<'gc> VM<'gc> {
                 self.ip = target_ip;
             }
             Value::NativeFunction(id) => {
-                let args: Vec<Value<'gc>> = self.stack.drain(callee_idx + 1..).collect();
-                self.stack.pop(); // pop the callee
                 let promise_construct_context = self
                     .new_target_stack
                     .last()
@@ -2046,9 +2044,26 @@ impl<'gc> VM<'gc> {
                     self.handle_throw(ctx, &err)?;
                     return Ok(OpcodeAction::Continue);
                 }
+                let arg_start = callee_idx + 1;
+                let arg_count = self.stack.len() - arg_start;
+                let mut inline_args: [Value<'gc>; 4] = std::array::from_fn(|_| Value::Undefined);
+                let heap_args;
+                let args = if arg_count <= inline_args.len() {
+                    inline_args[..arg_count].clone_from_slice(&self.stack[arg_start..]);
+                    &inline_args[..arg_count]
+                } else {
+                    heap_args = self.stack[arg_start..].to_vec();
+                    heap_args.as_slice()
+                };
+                let base = if is_method { callee_idx.saturating_sub(1) } else { callee_idx };
+                let recv = if is_method {
+                    self.stack.get(base).cloned().unwrap_or(Value::Undefined)
+                } else {
+                    Value::Undefined
+                };
+                self.stack.truncate(base);
                 if is_method {
-                    let recv = self.stack.pop().unwrap_or(Value::Undefined);
-                    let result = self.call_method_builtin(ctx, id, &recv, &args);
+                    let result = self.call_method_builtin(ctx, id, &recv, args);
                     self.stack.push(result);
                     if let Some(thrown) = self.pending_throw.take() {
                         self.handle_throw(ctx, &thrown)?;
@@ -2057,9 +2072,9 @@ impl<'gc> VM<'gc> {
                 } else {
                     let pushed_new_target = self.push_dynamic_function_call_new_target(&callee, id);
                     let result = if Self::native_function_uses_method_receiver(id) {
-                        self.call_method_builtin(ctx, id, &Value::Undefined, &args)
+                        self.call_method_builtin(ctx, id, &Value::Undefined, args)
                     } else {
-                        self.call_builtin(ctx, id, &args)
+                        self.call_builtin(ctx, id, args)
                     };
                     if pushed_new_target {
                         self.new_target_stack.pop();

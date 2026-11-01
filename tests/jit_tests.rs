@@ -258,6 +258,42 @@ fn jit_array_mutations_preserve_descriptors_prototypes_and_partial_effects() {
 }
 
 #[test]
+fn jit_native_call_argument_storage_preserves_receivers_and_evaluation_order() {
+    let source = r#"
+        const order = [];
+        function mark(value) { order.push(value); return value; }
+        const array = [];
+        array.push(mark(1), mark(2), mark(3), mark(4), mark(5));
+        const popped = array.pop();
+        array.push(mark(6));
+        const map = new Map();
+        map.set(mark(7), mark(8));
+        const set = new Set();
+        set.add(mark(9));
+        function* values() { yield 10; }
+        const generatorValue = values().next().value;
+        [
+            array.length,
+            popped,
+            map.get(7),
+            set.has(9),
+            generatorValue,
+            Math.max(1, 2, 3, 4),
+            order.join(",")
+        ].join(":");
+    "#;
+    let expected = JsRuntime::with_gc_opcode_budget(1).unwrap().eval(source).unwrap();
+    for required in [false, true] {
+        let mut runtime = JsRuntime::new();
+        runtime.set_jit_required(required);
+        assert_eq!(runtime.eval(source).unwrap(), expected);
+        if required {
+            assert_no_interpreter(&mut runtime);
+        }
+    }
+}
+
+#[test]
 fn jit_dense_pop_preserves_length_descriptors_and_tail_identity() {
     let source = r#"
         const results = [];

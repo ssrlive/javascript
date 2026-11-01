@@ -5002,13 +5002,38 @@ impl<'gc> VM<'gc> {
             && key != "__proto__"
             && let Value::Object(map) = &obj
         {
-            let borrow = map.borrow();
-            if !borrow.contains_key("__proxy_target__")
-                && !borrow.contains_key("__module_namespace__")
-                && !matches!(borrow.get("__realm_id__"), Some(Value::Number(_)))
-                && let Some(value @ Value::Number(_)) = borrow.get(&key)
-            {
-                self.stack.push(value.clone());
+            let fast_numeric_value = {
+                let borrow = map.borrow();
+                if borrow.contains_key("__proxy_target__")
+                    || borrow.contains_key("__module_namespace__")
+                    || matches!(borrow.get("__realm_id__"), Some(Value::Number(_)))
+                {
+                    None
+                } else if let Some(Value::Number(value)) = borrow.get(&key) {
+                    Some(*value)
+                } else if !borrow.contains_key(&key)
+                    && !has_getter(&borrow, "__proto__")
+                    && !has_setter(&borrow, "__proto__")
+                    && let Some(Value::Object(proto)) = Self::internal_proto_from_object_map(&borrow)
+                {
+                    let proto = proto.borrow();
+                    if proto.contains_key("__proxy_target__")
+                        || proto.contains_key("__module_namespace__")
+                        || matches!(proto.get("__realm_id__"), Some(Value::Number(_)))
+                    {
+                        None
+                    } else {
+                        match proto.get(&key) {
+                            Some(Value::Number(value)) => Some(*value),
+                            _ => None,
+                        }
+                    }
+                } else {
+                    None
+                }
+            };
+            if let Some(value) = fast_numeric_value {
+                self.stack.push(Value::Number(value));
                 return Ok(OpcodeAction::Continue);
             }
         }

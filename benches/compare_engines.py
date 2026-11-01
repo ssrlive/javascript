@@ -24,6 +24,9 @@ WORKLOADS = {
     "closures": ("closures", "calls with mutable captured state"),
     "method_calls": ("methodCalls", "receiver-sensitive object method calls"),
     "property_access": ("propertyAccess", "own, inherited and accessor properties"),
+    "property_own": ("propertyOwn", "own data property reads and writes"),
+    "property_inherited": ("propertyInherited", "inherited data property reads"),
+    "property_accessor": ("propertyAccessor", "accessor getter invocation"),
     "array_methods": ("arrayMethods", "push/pop and map/reduce callbacks"),
     "array_push_pop": ("arrayPushPop", "array push/pop without callback methods"),
     "array_map": ("arrayMap", "Array.map callback and result handling"),
@@ -120,6 +123,39 @@ function propertyAccess(n) {
     for (let i = 0; i < n; i++) {
         state.value = i % 101;
         checksum += state.value + state.bias + state.doubled;
+    }
+    return checksum;
+}
+
+function propertyOwn(n) {
+    const state = { value: 1 };
+    let checksum = 0;
+    for (let i = 0; i < n; i++) {
+        state.value = i % 101;
+        checksum += state.value;
+    }
+    return checksum;
+}
+
+function propertyInherited(n) {
+    const prototype = { bias: 7 };
+    const state = Object.create(prototype);
+    state.value = 1;
+    let checksum = 0;
+    for (let i = 0; i < n; i++) {
+        state.value = i % 101;
+        checksum += state.bias;
+    }
+    return checksum;
+}
+
+function propertyAccessor(n) {
+    const state = { value: 1 };
+    Object.defineProperty(state, "doubled", { get() { return this.value * 2; } });
+    let checksum = 0;
+    for (let i = 0; i < n; i++) {
+        state.value = i % 101;
+        checksum += state.doubled;
     }
     return checksum;
 }

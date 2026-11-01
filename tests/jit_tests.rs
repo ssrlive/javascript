@@ -2081,7 +2081,17 @@ fn jit_own_numeric_property_reads_preserve_proxy_and_accessor_semantics() {
             },
             other: 7
         };
-        target.value + "|" + proxy.value + "|" + accessor.value + "|" + proxyCalls + "|" + getterCalls;
+        const inheritedPrototype = { bias: 9 };
+        const inherited = Object.create(inheritedPrototype);
+        const proxyPrototype = new Proxy({ bias: 11 }, {
+            get(object, key, receiver) {
+                proxyCalls++;
+                return Reflect.get(object, key, receiver) + 1;
+            }
+        });
+        const inheritedProxy = Object.create(proxyPrototype);
+        target.value + "|" + proxy.value + "|" + accessor.value + "|" +
+            inherited.bias + "|" + inheritedProxy.bias + "|" + proxyCalls + "|" + getterCalls;
     "#;
     let mut interpreter = JsRuntime::new();
     let expected = interpreter.eval(source).unwrap();
@@ -2091,7 +2101,7 @@ fn jit_own_numeric_property_reads_preserve_proxy_and_accessor_semantics() {
     let result = runtime.eval(source).unwrap();
 
     assert_eq!(result, expected);
-    assert_eq!(result, JsValue::String("41|42|7|1|1".into()));
+    assert_eq!(result, JsValue::String("41|42|7|9|12|2|1".into()));
 }
 
 #[test]

@@ -1304,8 +1304,7 @@ impl<'gc> VM<'gc> {
                 return Value::Undefined;
             }
             let input_u16 = crate::core::value_to_u16(&prim);
-            let result = self.regex_exec(ctx, map, &input_u16);
-            return Value::Boolean(!matches!(result, Value::Null));
+            return self.regex_test(ctx, map, &input_u16);
         }
         self.throw_type_error(ctx, "RegExp.prototype.test called on incompatible receiver");
         Value::Undefined
@@ -2665,8 +2664,25 @@ impl<'gc> VM<'gc> {
         original_index
     }
 
-    /// Execute a regex match, returning an array result or Null
+    fn regex_test(&mut self, ctx: &GcContext<'gc>, re_obj: &ObjectHandle<'gc>, input_u16: &[u16]) -> Value<'gc> {
+        match self.regex_exec_inner(ctx, re_obj, input_u16, false) {
+            Value::Null => Value::Boolean(false),
+            result => result,
+        }
+    }
+
+    /// Execute a regex match, returning an array result or Null.
     pub(super) fn regex_exec(&mut self, ctx: &GcContext<'gc>, re_obj: &ObjectHandle<'gc>, input_u16: &[u16]) -> Value<'gc> {
+        self.regex_exec_inner(ctx, re_obj, input_u16, true)
+    }
+
+    fn regex_exec_inner(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        re_obj: &ObjectHandle<'gc>,
+        input_u16: &[u16],
+        build_match_result: bool,
+    ) -> Value<'gc> {
         let rx = Value::Object(*re_obj);
         let borrow = re_obj.borrow();
         let flags = borrow.get("__regex_flags__").map(value_to_string).unwrap_or_default();
@@ -2705,6 +2721,9 @@ impl<'gc> VM<'gc> {
         let (working_input, mapped_input) = self.regex_prepare_input(input_u16, &flags);
         let match_result = if flags.contains('u') || flags.contains('v') {
             re.find_from_utf16(&working_input, last_index).next()
+        } else if !flags.contains('i') && pattern_u16.iter().all(|unit| *unit <= 0x7f) && working_input.iter().all(|unit| *unit <= 0x7f) {
+            let ascii_input: String = working_input.iter().map(|unit| char::from(*unit as u8)).collect();
+            re.find_from_ascii(&ascii_input, last_index).next()
         } else {
             re.find_from_ucs2(&working_input, last_index).next()
         };
@@ -2719,6 +2738,16 @@ impl<'gc> VM<'gc> {
                 } else {
                     (m.range.start, m.range.end)
                 };
+                if !build_match_result {
+                    self.update_legacy_regexp_static_state(ctx, input_u16, match_start, match_end, &m.captures, mapped_input);
+                    if (is_global || is_sticky)
+                        && let Err(thrown) = self.host_fn_set_property(ctx, &rx, "lastIndex", &Value::Number(match_end as f64))
+                    {
+                        self.pending_throw = Some(thrown);
+                        return Value::Boolean(false);
+                    }
+                    return Value::Boolean(true);
+                }
                 let matched_str = &input_u16[match_start..match_end];
 
                 let mut result_items = Vec::with_capacity(m.captures.len() + 1);
@@ -2858,7 +2887,7 @@ impl<'gc> VM<'gc> {
                     self.pending_throw = Some(thrown);
                     return Value::Null;
                 }
-                Value::Null
+                if build_match_result { Value::Null } else { Value::Boolean(false) }
             }
         }
     }

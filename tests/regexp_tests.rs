@@ -33,6 +33,33 @@ mod regexp_tests {
     }
 
     #[test]
+    fn test_regexp_test_preserves_last_index_and_legacy_capture_state() {
+        let script = r#"
+            const regexp = /(a)(b)?/dg;
+            const matched = regexp.test("za");
+            const matchState = [regexp.lastIndex, RegExp.lastMatch, RegExp.$1, RegExp.$2, RegExp.lastParen];
+            const missed = regexp.test("x");
+            [matched, ...matchState, missed, regexp.lastIndex, RegExp.lastMatch].join("|");
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
+        assert_eq!(result, "\"true|2|a|a||a|false|0|a\"");
+    }
+
+    #[test]
+    fn test_regexp_ascii_matcher_falls_back_for_unicode_and_case_folding() {
+        let script = r#"
+            [
+                /é/.test("xé"),
+                /a/.test("éa"),
+                /FOO/i.test("foo"),
+                /./u.test("😀")
+            ].join("|");
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
+        assert_eq!(result, "\"true|true|true|true\"");
+    }
+
+    #[test]
     fn test_regexp_test_method_case_insensitive() {
         let script = "new RegExp('hello', 'i').test('HELLO world')";
         let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();

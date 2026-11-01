@@ -40,6 +40,7 @@ WORKLOADS = {
     "strings": ("strings", "concatenation, slicing and character access"),
     "regexp": ("regexp", "RegExp execution and capture groups"),
     "regexp_test": ("regexpTest", "RegExp test without match result allocation"),
+    "regexp_test_reused_input": ("regexpTestReusedInput", "RegExp test with a prebuilt input string"),
     "regexp_exec_no_capture": ("regexpExecNoCapture", "RegExp exec without capture groups"),
     "map_set": ("mapSet", "Map/Set insertion, lookup and deletion"),
     "map_set_update": ("mapSetUpdate", "repeated Map updates over a bounded key set"),
@@ -287,6 +288,16 @@ function regexpTest(n) {
     let checksum = 0;
     for (let i = 0; i < n; i++) {
         if (pattern.test("item-" + (i % 1000) + "-value")) checksum++;
+    }
+    return checksum;
+}
+
+function regexpTestReusedInput(n) {
+    const pattern = /^item-\d+-[a-z]+$/;
+    const input = "item-123-value";
+    let checksum = 0;
+    for (let i = 0; i < n; i++) {
+        if (pattern.test(input)) checksum++;
     }
     return checksum;
 }

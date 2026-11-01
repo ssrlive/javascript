@@ -513,6 +513,26 @@ fn jit_shared_regexp_matchers_preserve_live_state_captures_and_reentrancy() {
 }
 
 #[test]
+fn jit_regexp_test_preserves_last_index_and_legacy_capture_state() {
+    let source = r#"
+        const regexp = /(a)(b)?/dg;
+        const matched = regexp.test("za");
+        const matchState = [regexp.lastIndex, RegExp.lastMatch, RegExp.$1, RegExp.$2, RegExp.lastParen];
+        const missed = regexp.test("x");
+        [matched, ...matchState, missed, regexp.lastIndex, RegExp.lastMatch].join("|");
+    "#;
+    let expected = JsRuntime::with_gc_opcode_budget(1).unwrap().eval(source).unwrap();
+    for required in [false, true] {
+        let mut runtime = JsRuntime::new();
+        runtime.set_jit_required(required);
+        assert_eq!(runtime.eval(source).unwrap(), expected);
+        if required {
+            assert_no_interpreter(&mut runtime);
+        }
+    }
+}
+
+#[test]
 fn jit_native_bitwise_loops_match_conversion_and_shift_semantics() {
     for (value, shift) in [
         ("-1.75", "-1"),

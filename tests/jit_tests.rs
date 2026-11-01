@@ -2030,6 +2030,38 @@ fn jit_baseline_suspended_generators_keep_captured_objects_alive() {
 }
 
 #[test]
+fn jit_own_numeric_property_reads_preserve_proxy_and_accessor_semantics() {
+    let source = r#"
+        let getterCalls = 0;
+        let proxyCalls = 0;
+        const target = { value: 41 };
+        const proxy = new Proxy(target, {
+            get(object, key, receiver) {
+                proxyCalls++;
+                return Reflect.get(object, key, receiver) + 1;
+            }
+        });
+        const accessor = {
+            get value() {
+                getterCalls++;
+                return this.other;
+            },
+            other: 7
+        };
+        target.value + "|" + proxy.value + "|" + accessor.value + "|" + proxyCalls + "|" + getterCalls;
+    "#;
+    let mut interpreter = JsRuntime::new();
+    let expected = interpreter.eval(source).unwrap();
+    let mut runtime = JsRuntime::new();
+    runtime.set_jit_required(true);
+
+    let result = runtime.eval(source).unwrap();
+
+    assert_eq!(result, expected);
+    assert_eq!(result, JsValue::String("41|42|7|1|1".into()));
+}
+
+#[test]
 fn jit_baseline_classes_preserve_super_receivers_and_descriptors() {
     assert_baseline_matches(
         r#"

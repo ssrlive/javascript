@@ -5003,6 +5003,20 @@ impl<'gc> VM<'gc> {
                 return Ok(OpcodeAction::Continue);
             }
         }
+        if !key.starts_with(PRIVATE_KEY_PREFIX)
+            && key != "__proto__"
+            && let Value::Object(map) = &obj
+        {
+            let borrow = map.borrow();
+            if !borrow.contains_key("__proxy_target__")
+                && !borrow.contains_key("__module_namespace__")
+                && !matches!(borrow.get("__realm_id__"), Some(Value::Number(_)))
+                && let Some(value @ Value::Number(_)) = borrow.get(&key)
+            {
+                self.stack.push(value.clone());
+                return Ok(OpcodeAction::Continue);
+            }
+        }
         // Private field access bypasses proxy traps — access the object directly
         if !key.starts_with(PRIVATE_KEY_PREFIX) {
             match self.try_proxy_get(ctx, &obj, &key, None) {

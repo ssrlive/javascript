@@ -27,15 +27,25 @@ WORKLOADS = {
     "property_own": ("propertyOwn", "own data property reads and writes"),
     "property_inherited": ("propertyInherited", "inherited data property reads"),
     "property_accessor": ("propertyAccessor", "accessor getter invocation"),
+    "property_getter_empty": ("propertyGetterEmpty", "empty accessor getter invocation"),
+    "property_call_empty": ("propertyCallEmpty", "empty ordinary function call control"),
     "array_methods": ("arrayMethods", "push/pop and map/reduce callbacks"),
     "array_push_pop": ("arrayPushPop", "array push/pop without callback methods"),
+    "array_push_only": ("arrayPushOnly", "single-element push and array growth"),
+    "array_pop_only": ("arrayPopOnly", "single-element pop after indexed initialization"),
     "array_map": ("arrayMap", "Array.map callback and result handling"),
     "array_reduce": ("arrayReduce", "Array.reduce callback and accumulator handling"),
     "array_callback_control": ("arrayCallbackControl", "direct callback calls matching array callback counts"),
     "typed_arrays": ("typedArrays", "Uint32Array indexed loads and stores"),
     "strings": ("strings", "concatenation, slicing and character access"),
     "regexp": ("regexp", "RegExp execution and capture groups"),
+    "regexp_test": ("regexpTest", "RegExp test without match result allocation"),
+    "regexp_exec_no_capture": ("regexpExecNoCapture", "RegExp exec without capture groups"),
     "map_set": ("mapSet", "Map/Set insertion, lookup and deletion"),
+    "map_set_update": ("mapSetUpdate", "repeated Map updates over a bounded key set"),
+    "map_get": ("mapGet", "Map lookup over a pre-populated key set"),
+    "set_add_has": ("setAddHas", "Set insertion and membership over a bounded key set"),
+    "map_delete_reinsert": ("mapDeleteReinsert", "Map deletion followed by reinsertion"),
     "json": ("jsonRoundtrip", "JSON stringify/parse; ceil(iterations/10) roundtrips"),
     "bigint": ("bigintArithmetic", "bounded BigInt arithmetic; ceil(iterations/10) steps"),
     "exceptions": ("exceptions", "throw/optional catch/finally; one throw per 16 steps"),
@@ -160,6 +170,21 @@ function propertyAccessor(n) {
     return checksum;
 }
 
+function propertyGetterEmpty(n) {
+    const state = {};
+    Object.defineProperty(state, "value", { get() { return 1; } });
+    let checksum = 0;
+    for (let i = 0; i < n; i++) checksum += state.value;
+    return checksum;
+}
+
+function propertyCallEmpty(n) {
+    function read() { return 1; }
+    let checksum = 0;
+    for (let i = 0; i < n; i++) checksum += read();
+    return checksum;
+}
+
 function arrayMethods(n) {
     const values = [];
     let checksum = 0;
@@ -180,6 +205,21 @@ function arrayPushPop(n) {
         values.push(i % 101);
         checksum += values.pop();
     }
+    return checksum + values.length;
+}
+
+function arrayPushOnly(n) {
+    const values = [];
+    let checksum = 0;
+    for (let i = 0; i < n; i++) checksum += values.push(i % 101);
+    return checksum + values.length + values[values.length - 1];
+}
+
+function arrayPopOnly(n) {
+    const values = new Array(n);
+    for (let i = 0; i < n; i++) values[i] = i % 101;
+    let checksum = 0;
+    for (let i = 0; i < n; i++) checksum += values.pop();
     return checksum + values.length;
 }
 
@@ -242,6 +282,25 @@ function regexp(n) {
     return checksum;
 }
 
+function regexpTest(n) {
+    const pattern = /^item-\d+-[a-z]+$/;
+    let checksum = 0;
+    for (let i = 0; i < n; i++) {
+        if (pattern.test("item-" + (i % 1000) + "-value")) checksum++;
+    }
+    return checksum;
+}
+
+function regexpExecNoCapture(n) {
+    const pattern = /^item-\d+-[a-z]+$/;
+    let checksum = 0;
+    for (let i = 0; i < n; i++) {
+        const match = pattern.exec("item-" + (i % 1000) + "-value");
+        checksum += match[0].length;
+    }
+    return checksum;
+}
+
 function mapSet(n) {
     const map = new Map();
     const set = new Set();
@@ -257,6 +316,46 @@ function mapSet(n) {
         }
     }
     return checksum + map.size + set.size;
+}
+
+function mapSetUpdate(n) {
+    const map = new Map();
+    let checksum = 0;
+    for (let i = 0; i < n; i++) {
+        const key = i % 256;
+        map.set(key, i % 100003);
+    }
+    for (let i = 0; i < 256; i++) checksum += map.get(i);
+    return checksum + map.size;
+}
+
+function mapGet(n) {
+    const map = new Map();
+    for (let i = 0; i < 256; i++) map.set(i, i * 3);
+    let checksum = 0;
+    for (let i = 0; i < n; i++) checksum += map.get(i % 256);
+    return checksum + map.size;
+}
+
+function setAddHas(n) {
+    const set = new Set();
+    let checksum = 0;
+    for (let i = 0; i < n; i++) {
+        const key = i % 256;
+        set.add(key);
+        if (set.has(key)) checksum++;
+    }
+    return checksum + set.size;
+}
+
+function mapDeleteReinsert(n) {
+    const map = new Map();
+    let checksum = 0;
+    for (let i = 0; i < n; i++) {
+        map.set(0, i);
+        if (map.delete(0)) checksum++;
+    }
+    return checksum + map.size;
 }
 
 function jsonRoundtrip(n) {

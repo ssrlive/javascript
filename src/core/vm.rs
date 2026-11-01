@@ -17796,6 +17796,28 @@ impl<'gc> VM<'gc> {
         )
     }
 
+    fn prototype_chain_contains_proxy(&self, proto: Option<&Value<'gc>>) -> bool {
+        let mut current = proto.cloned();
+        for _ in 0..100 {
+            match current {
+                Some(Value::Object(map)) => {
+                    let borrow = map.borrow();
+                    if borrow.contains_key("__proxy_target__") {
+                        return true;
+                    }
+                    current = Self::internal_proto_from_object_map(&borrow);
+                }
+                Some(Value::Array(array)) => {
+                    let borrow = array.borrow();
+                    current = Self::internal_proto_from_array_map(&borrow.props);
+                }
+                Some(Value::Null) | None => return false,
+                Some(_) => return true,
+            }
+        }
+        current.is_some()
+    }
+
     /// Check whether the first matching own property in a prototype chain is
     /// a non-writable data property.
     fn has_readonly_in_proto_chain(&self, proto: Option<&Value<'gc>>, key: &str) -> bool {
@@ -33222,6 +33244,39 @@ impl<'gc> VM<'gc> {
                 return Value::Undefined;
             }
             return element;
+        }
+
+        if id == BUILTIN_ARRAY_PUSH
+            && args.len() == 1
+            && let Value::Array(array) = receiver
+        {
+            let fast_path = {
+                let data = array.borrow();
+                let len = data.elements.len();
+                let key = len.to_string();
+                let proto = data.props.get("__proto__").cloned().or_else(|| self.array_prototype_value());
+                (len < u32::MAX as usize
+                    && self.array_length_u64(&data) == len as u64
+                    && !data.props.contains_key("__typedarray_name__")
+                    && !data.props.contains_key(&key)
+                    && !has_readonly_mark(&data.props, "length")
+                    && !has_getter(&data.props, "length")
+                    && !has_setter(&data.props, "length")
+                    && !matches!(data.props.get("__non_extensible__"), Some(Value::Boolean(true)))
+                    && !matches!(data.props.get("__sealed__"), Some(Value::Boolean(true)))
+                    && !matches!(data.props.get("__frozen__"), Some(Value::Boolean(true)))
+                    && !self.prototype_chain_contains_proxy(proto.as_ref()))
+                .then_some((len, key, proto))
+            };
+            if let Some((len, key, proto)) = fast_path
+                && !self.has_accessor_in_proto_chain(proto.as_ref(), &key)
+                && !self.has_readonly_in_proto_chain(proto.as_ref(), &key)
+            {
+                let mut data = array.borrow_mut(ctx);
+                data.elements.push(args[0].clone());
+                self.set_array_length_u64(&mut data, (len + 1) as u64);
+                return Value::Number((len + 1) as f64);
+            }
         }
 
         if id == BUILTIN_ARRAY_PUSH {

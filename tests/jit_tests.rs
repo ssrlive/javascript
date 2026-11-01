@@ -244,6 +244,18 @@ fn jit_array_mutations_preserve_descriptors_prototypes_and_partial_effects() {
         });
         proxy.push(31); proxy.pop();
         results.push(events.join(","));
+
+        const proxyPrototypeEvents = [];
+        const proxyPrototype = new Proxy({}, {
+            set(object, key, value, receiver) {
+                proxyPrototypeEvents.push(key);
+                return Reflect.set(object, key, value, receiver);
+            }
+        });
+        const proxyPrototypeArray = [];
+        Object.setPrototypeOf(proxyPrototypeArray, proxyPrototype);
+        Reflect.apply(Array.prototype.push, proxyPrototypeArray, [41]);
+        results.push(proxyPrototypeArray.length, proxyPrototypeArray[0], proxyPrototypeEvents.join(","));
         results.join("|");
     "#;
     let expected = JsRuntime::with_gc_opcode_budget(1).unwrap().eval(source).unwrap();

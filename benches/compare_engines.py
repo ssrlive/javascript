@@ -25,6 +25,10 @@ WORKLOADS = {
     "method_calls": ("methodCalls", "receiver-sensitive object method calls"),
     "property_access": ("propertyAccess", "own, inherited and accessor properties"),
     "array_methods": ("arrayMethods", "push/pop and map/reduce callbacks"),
+    "array_push_pop": ("arrayPushPop", "array push/pop without callback methods"),
+    "array_map": ("arrayMap", "Array.map callback and result handling"),
+    "array_reduce": ("arrayReduce", "Array.reduce callback and accumulator handling"),
+    "array_callback_control": ("arrayCallbackControl", "direct callback calls matching array callback counts"),
     "typed_arrays": ("typedArrays", "Uint32Array indexed loads and stores"),
     "strings": ("strings", "concatenation, slicing and character access"),
     "regexp": ("regexp", "RegExp execution and capture groups"),
@@ -131,6 +135,44 @@ function arrayMethods(n) {
         }
     }
     return checksum + values.reduce((sum, value) => sum + value, 0);
+}
+
+function arrayPushPop(n) {
+    const values = [];
+    let checksum = 0;
+    for (let i = 0; i < n; i++) {
+        values.push(i % 101);
+        checksum += values.pop();
+    }
+    return checksum + values.length;
+}
+
+function arrayMap(n) {
+    const values = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+    let checksum = 0;
+    for (let i = 0; i < n; i += 16) {
+        const mapped = values.map(value => value * 3 + 1);
+        checksum += mapped[0];
+    }
+    return checksum;
+}
+
+function arrayReduce(n) {
+    const values = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+    let checksum = 0;
+    for (let i = 0; i < n; i += 16) {
+        checksum += values.reduce((sum, value) => sum + value, 0);
+    }
+    return checksum;
+}
+
+function arrayCallbackControl(n) {
+    const callback = value => value * 3 + 1;
+    let checksum = 0;
+    for (let i = 0; i < n; i += 16) {
+        for (let value = 0; value < 16; value++) checksum += callback(value);
+    }
+    return checksum;
 }
 
 function typedArrays(n) {

@@ -4950,12 +4950,7 @@ impl<'gc> VM<'gc> {
 
     fn run_opcode_get_property(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let name_idx = self.read_u16() as usize;
-        let name_val = &self.chunk.constants[name_idx];
-        let key = if let Value::String(s) = name_val {
-            crate::unicode::utf16_to_utf8(s)
-        } else {
-            value_to_string(name_val)
-        };
+        let key = self.constant_property_key(name_idx);
         let obj = self.stack.pop().expect("VM Stack underflow on GetProperty");
         // Private field brand check for reads: accessing a #-prefixed key on an object
         // that doesn't own it is a TypeError. Private members are now per-instance (own props only).
@@ -5770,12 +5765,7 @@ impl<'gc> VM<'gc> {
     // Opcode::SetProperty
     fn run_opcode_set_property(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let name_idx = self.read_u16() as usize;
-        let name_val = &self.chunk.constants[name_idx];
-        let key = if let Value::String(s) = name_val {
-            crate::unicode::utf16_to_utf8(s)
-        } else {
-            value_to_string(name_val)
-        };
+        let key = self.constant_property_key(name_idx);
         let val = self.stack.pop().expect("VM Stack underflow on SetProperty (val)");
         let obj = self.stack.pop().expect("VM Stack underflow on SetProperty (obj)");
         // Private field brand check: setting a #-prefixed key on an object
@@ -7470,12 +7460,7 @@ impl<'gc> VM<'gc> {
         // Stack: [..., obj] -> [..., obj, method]
         // Peek at object on TOS, resolve method, push on top
         let name_idx = self.read_u16() as usize;
-        let name_val = &self.chunk.constants[name_idx];
-        let key = if let Value::String(s) = name_val {
-            crate::unicode::utf16_to_utf8(s)
-        } else {
-            value_to_string(name_val)
-        };
+        let key = self.constant_property_key(name_idx);
         let raw_obj = self.stack.last().cloned().expect("VM Stack underflow on GetMethod");
         // Accessing a property on undefined/null is a TypeError
         if matches!(raw_obj, Value::Undefined | Value::Null) {

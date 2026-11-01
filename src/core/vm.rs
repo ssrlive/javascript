@@ -925,6 +925,7 @@ pub struct VM<'gc> {
     jit_stats: crate::runtime::JitStats,
     jit_roots: Vec<Value<'gc>>,
     collection_lookup_hints: RefCell<HashMap<(usize, u64), usize>>,
+    property_key_cache: Vec<Option<String>>,
     function_call_info_cache: HashMap<usize, FunctionCallInfo>,
     stop_requested: bool,
     // Property storage for Function values, keyed by function IP
@@ -1355,6 +1356,7 @@ impl<'gc> VM<'gc> {
             jit_stats: crate::runtime::JitStats::default(),
             jit_roots: Vec::new(),
             collection_lookup_hints: RefCell::new(HashMap::new()),
+            property_key_cache: Vec::new(),
             function_call_info_cache: HashMap::new(),
             stop_requested: false,
             fn_props: HashMap::new(),
@@ -1468,6 +1470,26 @@ impl<'gc> VM<'gc> {
         };
         self.function_call_info_cache.insert(ip, info);
         info
+    }
+
+    fn constant_property_key(&mut self, constant_idx: usize) -> String {
+        if let Some(key) = self.property_key_cache.get(constant_idx).and_then(Option::as_ref) {
+            return key.clone();
+        }
+        let value = self
+            .chunk
+            .constants
+            .get(constant_idx)
+            .expect("property key constant index is valid");
+        let key = match value {
+            Value::String(string) => crate::unicode::utf16_to_utf8(string),
+            _ => value_to_string(value),
+        };
+        if self.property_key_cache.len() <= constant_idx {
+            self.property_key_cache.resize_with(constant_idx + 1, || None);
+        }
+        self.property_key_cache[constant_idx] = Some(key.clone());
+        key
     }
 
     pub fn set_source_context(&mut self, script_source: &str, script_path: Option<&std::path::Path>) {
